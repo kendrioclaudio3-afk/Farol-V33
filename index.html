@@ -1,0 +1,1817 @@
+<!DOCTYPE html>
+<html lang="pt-PT">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#060913">
+  <title>Farol de Manutencao Pro</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+  
+  <style>
+    html, body, #root { min-height: 100vh; background-color: #060913; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 10px; }
+    @keyframes farolMenuIn {
+      from { opacity: 0; transform: translateY(-6px) scale(0.97); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    @keyframes farolSoftPop {
+      0% { transform: scale(0.94); opacity: 0.75; }
+      100% { transform: scale(1); opacity: 1; }
+    }
+    .farol-status-menu { animation: farolMenuIn 150ms cubic-bezier(.2,.8,.2,1); transform-origin: top left; }
+    .farol-status-option { transition: background-color 140ms ease, transform 140ms ease, color 140ms ease; }
+    .farol-status-option:active { transform: scale(0.96); }
+  </style>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+    import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+    import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+    
+    window.firebaseModules = {
+      initializeApp, getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken,
+      getFirestore, doc, setDoc, onSnapshot
+    };
+  </script>
+</head>
+
+<body class="antialiased pb-24 text-[14px]">
+  <div id="root"></div>
+
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    const STATUS_OPTIONS = [
+      { id: 'none', icon: '▪️', label: 'Sem Bolinha (Sub-item)' },
+      { id: 'sub_inicio', icon: '├─ ▪️', label: 'Início:' },
+      { id: 'sub_termino', icon: '├─ ▪️', label: 'Término:' },
+      { id: 'sub_duracao', icon: '└─ ▪️', label: 'Duração:' },
+      { id: 'not_started', icon: '⚪', label: 'Não iniciado' },
+      { id: 'in_progress', icon: '🟡', label: 'Em andamento' },
+      { id: 'completed', icon: '🟢', label: 'Concluído' },
+      { id: 'delayed', icon: '🔴', label: 'Atrasado' },
+      { id: 'cancelled', icon: '❌', label: 'Cancelado' }
+    ];
+
+    const INITIAL_DATA = {
+      title: 'MP VV-03',
+      expectedStart: '02/09/2026 ÀS 12:30',
+      expectedEnd: '05/09/2026 ÀS 12:00',
+      tasks: [
+        { id: 's1', isSection: true, name: 'MECÂNICA', status: 'none', startTime: '', endTime: '', duration: '', startTimeMs: null, endTimeMs: null },
+        { id: '1', isSection: false, name: '[Trocar] Paraf da crem do c.p do VV3', status: '⚪', startTime: '', endTime: '', duration: '', progress: '', startTimeMs: null, endTimeMs: null },
+      ]
+    };
+
+    const DynamicCalendar = ({ textValue, darkMode }) => {
+      const match = textValue?.match(/(\d{1,2})\//);
+      const day = match ? match[1] : '';
+      if (!day) return <span className="text-[1.1em]">📆</span>;
+      return (
+        <div className={`relative inline-flex items-center justify-center w-[1.4em] h-[1.4em] ${darkMode ? 'bg-slate-800 text-white' : 'bg-white text-slate-900'} rounded shadow-sm border ${darkMode ? 'border-slate-700' : 'border-slate-300'} overflow-hidden flex-shrink-0 mx-1`}>
+          <div className="absolute top-0 w-full h-[30%] bg-rose-500"></div>
+          <span className="font-black mt-[4px] leading-none tracking-tighter" style={{ fontSize: '0.65em' }}>{day}</span>
+        </div>
+      );
+    };
+
+    function App() {
+      const STORAGE_KEY = 'farol_pro_dados_v32';
+      const TEMPLATE_KEY = 'farol_pro_templates_v32';
+
+      const [data, setData] = useState(() => {
+        try {
+          const savedLocal = localStorage.getItem(STORAGE_KEY);
+          if (savedLocal) return JSON.parse(savedLocal);
+        } catch (e) {}
+        return INITIAL_DATA;
+      });
+
+      const [user, setUser] = useState(null);
+      const [db, setDb] = useState(null);
+      const [appId, setAppId] = useState('default-farol-pro-id');
+
+      const [sectionInputs, setSectionInputs] = useState({});
+      const [newSectionName, setNewSectionName] = useState('');
+      
+      const [wppMode, setWppMode] = useState('DURACAO_AUTO');
+      const [pdfIncludeHours, setPdfIncludeHours] = useState(true);
+      const [zoomLevel, setZoomLevel] = useState(2); 
+
+      const [showTemplates, setShowTemplates] = useState(false);
+      const [templateSearch, setTemplateSearch] = useState(''); 
+      const [showPdfModal, setShowPdfModal] = useState(false);
+      const [showChartModal, setShowChartModal] = useState(false);
+      const [showSummary, setShowSummary] = useState(false);
+      const [summaryMessage, setSummaryMessage] = useState('');
+      const [showMenuDropdown, setShowMenuDropdown] = useState(false);
+      
+      const [pdfCustomTitle, setPdfCustomTitle] = useState('');
+      const [pdfCustomStart, setPdfCustomStart] = useState('');
+      const [pdfCustomEnd, setPdfCustomEnd] = useState('');
+      const [pdfCustomTasks, setPdfCustomTasks] = useState([]);
+      
+      const [activeStatusMenu, setActiveStatusMenu] = useState(null);
+      const [expandedTasks, setExpandedTasks] = useState({});
+      const [darkMode, setDarkMode] = useState(true);
+
+      const [modal, setModal] = useState({ isOpen: false, type: '', data: null });
+      const [promptInput, setPromptInput] = useState('');
+      const [importText, setImportText] = useState('');
+      const [copySuccess, setCopySuccess] = useState(false);
+      const [backupMessage, setBackupMessage] = useState('');
+      const [undoAction, setUndoAction] = useState(null);
+      const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
+      const backupInputRef = useRef(null);
+      const undoTimerRef = useRef(null);
+      
+      const [saveStatus, setSaveStatus] = useState('LOCAL');
+      const [isCloudActive, setIsCloudActive] = useState(false); 
+      const [isDataLoaded, setIsDataLoaded] = useState(false);
+
+      const menuRef = useRef(null);
+      const dropdownRef = useRef(null);
+      const taskInputRefs = useRef({});
+      const topicInputRef = useRef(null);
+      const pdfContentRef = useRef(null);
+      const chartCanvasRef = useRef(null);
+      const debounceTimer = useRef(null);
+      const lastEnterTime = useRef({});
+
+      const [templates, setTemplates] = useState(() => {
+        try {
+          const saved = localStorage.getItem(TEMPLATE_KEY);
+          if (saved) return JSON.parse(saved);
+        } catch (e) {}
+        return [];
+      });
+
+      useEffect(() => { document.body.style.backgroundColor = darkMode ? '#060913' : '#f1f5f9'; }, [darkMode]);
+
+      useEffect(() => {
+         const interval = setInterval(() => { setData(prev => ({ ...prev })); }, 60000);
+         return () => clearInterval(interval);
+      }, []);
+
+      useEffect(() => {
+        const initEnvironment = async () => {
+          let fConfig = null;
+          try { fConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null; } catch (e) {}
+          if (!fConfig) { setIsDataLoaded(true); return; }
+          if (!window.firebaseModules) { setTimeout(initEnvironment, 500); return; }
+          try {
+            const { initializeApp, getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken, getFirestore } = window.firebaseModules;
+            const app = initializeApp(fConfig);
+            const auth = getAuth(app);
+            setDb(getFirestore(app));
+            setAppId(typeof __app_id !== 'undefined' ? __app_id : 'farol-pro');
+            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) await signInWithCustomToken(auth, __initial_auth_token);
+            else await signInAnonymously(auth);
+            onAuthStateChanged(auth, (currentUser) => {
+              setUser(currentUser);
+              if (currentUser) setIsCloudActive(true);
+              else setIsDataLoaded(true);
+            });
+          } catch (error) { setIsDataLoaded(true); }
+        };
+        initEnvironment();
+      }, []);
+
+      useEffect(() => {
+        if (!isCloudActive || !user || !db || !window.firebaseModules) return;
+        const { doc, onSnapshot } = window.firebaseModules;
+        const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'farol_data', 'current_board');
+        const unsubscribe = onSnapshot(docRef, (docSnap) => {
+          if (docSnap.exists()) {
+            const serverData = docSnap.data();
+            if (serverData && serverData.tasks) setData(serverData);
+          }
+          setSaveStatus('NUVEM');
+          setIsDataLoaded(true);
+        });
+        return () => unsubscribe();
+      }, [isCloudActive, user, db, appId]);
+
+      const saveToCloud = (dataToSave) => {
+        if (!user || !db || !window.firebaseModules) return;
+        setSaveStatus('A GRAVAR...');
+        clearTimeout(debounceTimer.current);
+        debounceTimer.current = setTimeout(async () => {
+          try {
+            const { doc, setDoc } = window.firebaseModules;
+            const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'farol_data', 'current_board');
+            await setDoc(docRef, dataToSave);
+            setSaveStatus('NUVEM');
+          } catch (error) { setSaveStatus('ERRO'); }
+        }, 800); 
+      };
+
+      const updateAndSave = (updater) => {
+        setData(prev => {
+          const nextData = typeof updater === 'function' ? updater(prev) : updater;
+          try { localStorage.setItem(STORAGE_KEY, JSON.stringify(nextData)); } catch (e) {}
+          if (isCloudActive) { saveToCloud(nextData); } else { setSaveStatus('LOCAL'); }
+          return nextData;
+        });
+      };
+
+      useEffect(() => {
+        try { localStorage.setItem(TEMPLATE_KEY, JSON.stringify(templates)); } catch (e) {}
+      }, [templates]);
+
+      useEffect(() => {
+        function handleClickOutside(event) {
+          if (menuRef.current && !menuRef.current.contains(event.target)) setActiveStatusMenu(null);
+          if (dropdownRef.current && !dropdownRef.current.contains(event.target)) setShowMenuDropdown(false);
+        }
+        document.addEventListener("mousedown", handleClickOutside);
+        document.addEventListener("touchstart", handleClickOutside, {passive: true});
+        return () => {
+           document.removeEventListener("mousedown", handleClickOutside);
+           document.removeEventListener("touchstart", handleClickOutside);
+        };
+      }, []);
+
+      const toggleExpand = (taskId) => setExpandedTasks(prev => ({ ...prev, [taskId]: !prev[taskId] }));
+
+      const getLiveDurationString = (startMs, endMs, status) => {
+          if (!startMs) return '';
+          const end = endMs || (status === '🟡' ? Date.now() : null);
+          if (!end && status !== '🟡') return '';
+          const diffMs = (end || Date.now()) - startMs;
+          const totalMins = Math.floor(diffMs / 60000);
+          const h = Math.floor(totalMins / 60);
+          const m = totalMins % 60;
+          if (h > 0 && m > 0) return `${h}h${m}m`;
+          if (h > 0) return `${h}h`;
+          if (m > 0) return `${m}m`;
+          return `0m`;
+      };
+
+      const formatTimeString = (ms) => {
+          if (!ms) return '';
+          const d = new Date(ms);
+          return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+      };
+
+      const handleAutoTime = (taskId, field) => { updateTaskField(taskId, field, Date.now()); };
+
+      const updateTaskField = (taskId, field, value) => {
+        updateAndSave(prevData => {
+          const newTasks = prevData.tasks.map(task => {
+            if (task.id === taskId) {
+              const updated = { ...task, [field]: value };
+              
+              if (field === 'status') {
+                 if (value === '🟡' && task.status !== '🟡') {
+                     if (!updated.startTimeMs) { updated.startTimeMs = Date.now(); updated.startTime = formatTimeString(updated.startTimeMs); }
+                     updated.endTimeMs = null; updated.endTime = ''; 
+                 } else if (value === '🟢') {
+                     if (!updated.startTimeMs) { updated.startTimeMs = Date.now(); updated.startTime = formatTimeString(updated.startTimeMs); }
+                     if (!updated.endTimeMs) { updated.endTimeMs = Date.now(); updated.endTime = formatTimeString(updated.endTimeMs); }
+                 } else if (value === '⚪' || value === '❌' || value === '🔴') {
+                     // Limpa apenas se for reiniciada, cancelada ou atrasada
+                     updated.startTimeMs = null; updated.endTimeMs = null;
+                     updated.progress = ''; updated.startTime = ''; updated.endTime = '';
+                 }
+              }
+
+              if (field === 'startTimeMs') updated.startTime = formatTimeString(value);
+              if (field === 'endTimeMs') updated.endTime = formatTimeString(value);
+
+              return updated;
+            }
+            return task;
+          });
+          return { ...prevData, tasks: newTasks };
+        });
+      };
+
+      const updatePdfTaskField = (taskId, field, value) => {
+        setPdfCustomTasks(prev => prev.map(task => {
+          if (task.id === taskId) {
+            return { ...task, [field]: value };
+          }
+          return task;
+        }));
+      };
+
+      const calculateSectionProgress = () => {
+        const progress = {};
+        let currentSectionId = null;
+        let totalTasks = 0, completedTasks = 0;
+
+        data.tasks.forEach((task) => {
+          if (task.isSection) {
+            if (currentSectionId) progress[currentSectionId] = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
+            currentSectionId = task.id;
+            totalTasks = 0; completedTasks = 0; 
+          } else {
+            if (task.status !== 'none' && task.status !== '▪️' && task.status !== '▫️' && task.status !== '◾') {
+              totalTasks++;
+              if (task.status === '🟢') { completedTasks += 1; } 
+              else if (task.status === '🟡' && task.progress) {
+                 const p = parseFloat(task.progress);
+                 if (!isNaN(p)) completedTasks += (p / 100);
+              }
+            }
+          }
+        });
+        if (currentSectionId) progress[currentSectionId] = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
+        return progress;
+      };
+
+      const sectionProgress = calculateSectionProgress();
+
+      // Resumo adicional: não altera a lógica das tarefas existentes.
+      const summary = data.tasks.reduce((acc, task) => {
+        if (task.isSection || task.status === '▪️' || task.status === '▫️' || task.status === '◾') return acc;
+        acc.total += 1;
+        if (task.status === '🟢') acc.completed += 1;
+        else if (task.status === '🟡') {
+          acc.inProgress += 1;
+          const pct = parseFloat(String(task.progress || '').replace(',', '.'));
+          if (!isNaN(pct)) acc.progressPoints += Math.min(100, Math.max(0, pct)) / 100;
+        } else if (task.status === '🔴') acc.delayed += 1;
+        else if (task.status === '❌') acc.cancelled += 1;
+        else acc.notStarted += 1;
+        return acc;
+      }, { total: 0, completed: 0, inProgress: 0, delayed: 0, cancelled: 0, notStarted: 0, progressPoints: 0 });
+      const overallProgress = summary.total > 0
+        ? Math.round(((summary.completed + summary.progressPoints) / summary.total) * 100)
+        : 0;
+
+      // Gráfico por modalidade: cada tópico vira uma fatia.
+      // As fatias representam a quantidade de atividades; o progresso da modalidade aparece na legenda.
+      const modalityColors = ['#3b82f6', '#8b5cf6', '#14b8a6', '#f59e0b', '#ec4899', '#22c55e', '#ef4444', '#06b6d4'];
+      const chartStatusData = [];
+      let currentModality = null;
+      data.tasks.forEach(task => {
+        if (task.isSection) {
+          currentModality = {
+            key: task.id,
+            label: task.name || 'Sem nome',
+            color: modalityColors[chartStatusData.length % modalityColors.length],
+            count: 0,
+            progress: sectionProgress[task.id] || 0,
+            statusCounts: { completed: 0, inProgress: 0, notStarted: 0, delayed: 0, cancelled: 0 }
+          };
+          chartStatusData.push(currentModality);
+        } else if (currentModality && !['▪️', '▫️', '◾'].includes(task.status)) {
+          currentModality.count += 1;
+          if (task.status === '🟢') currentModality.statusCounts.completed += 1;
+          else if (task.status === '🟡') currentModality.statusCounts.inProgress += 1;
+          else if (task.status === '🔴') currentModality.statusCounts.delayed += 1;
+          else if (task.status === '❌') currentModality.statusCounts.cancelled += 1;
+          else currentModality.statusCounts.notStarted += 1;
+        }
+      });
+      const modalityProgressValues = chartStatusData.map(item => item.progress);
+      const averagePercentage = modalityProgressValues.length === 0
+        ? 0
+        : modalityProgressValues.reduce((sum, value) => sum + value, 0) / modalityProgressValues.length;
+
+      const downloadFile = (blob, filename) => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      };
+
+      const exportBackup = () => {
+        const backup = {
+          app: 'Farol Pro',
+          version: 1,
+          exportedAt: new Date().toISOString(),
+          data,
+          templates
+        };
+        const date = new Date().toISOString().slice(0, 10);
+        downloadFile(new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' }), `farol-pro-backup-${date}.json`);
+        setBackupMessage('Backup exportado.');
+        setTimeout(() => setBackupMessage(''), 2500);
+      };
+
+      const drawActivityChart = () => {
+        const canvas = chartCanvasRef.current;
+        if (!canvas) return;
+        const width = 1600, height = 1020;
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.width = width * dpr;
+        canvas.height = height * dpr;
+        canvas.style.aspectRatio = `${width} / ${height}`;
+        const ctx = canvas.getContext('2d');
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, width, height);
+
+        const roundedRect = (x, y, w, h, r, fill, stroke = null) => {
+          ctx.beginPath();
+          ctx.moveTo(x + r, y);
+          ctx.lineTo(x + w - r, y);
+          ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+          ctx.lineTo(x + w, y + h - r);
+          ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+          ctx.lineTo(x + r, y + h);
+          ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+          ctx.lineTo(x, y + r);
+          ctx.quadraticCurveTo(x, y, x + r, y);
+          ctx.closePath();
+          ctx.fillStyle = fill;
+          ctx.fill();
+          if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 1; ctx.stroke(); }
+        };
+
+        const total = chartStatusData.reduce((sum, item) => sum + item.count, 0);
+        const roundedAverage = Math.round(averagePercentage);
+        const navy = '#0f172a';
+        const muted = '#64748b';
+        const border = '#e2e8f0';
+        const page = '#f8fafc';
+
+        // Página clara, própria para salvar, imprimir e compartilhar.
+        ctx.fillStyle = page;
+        ctx.fillRect(0, 0, width, height);
+        const header = ctx.createLinearGradient(0, 0, width, 0);
+        header.addColorStop(0, '#0f172a');
+        header.addColorStop(1, '#1e3a8a');
+        ctx.fillStyle = header;
+        ctx.fillRect(0, 0, width, 152);
+        ctx.fillStyle = '#60a5fa';
+        ctx.fillRect(0, 148, width, 4);
+
+        // Cabeçalho
+        ctx.fillStyle = '#ffffff';
+        ctx.font = '800 40px Arial, sans-serif';
+        ctx.fillText('FAROL PRO', 58, 62);
+        ctx.fillStyle = '#bfdbfe';
+        ctx.font = '700 23px Arial, sans-serif';
+        ctx.fillText('RELATÓRIO VISUAL DE MANUTENÇÃO', 58, 99);
+        ctx.fillStyle = '#ffffff';
+        ctx.font = '800 25px Arial, sans-serif';
+        ctx.textAlign = 'right';
+        ctx.fillText(data.title || 'Manutenção sem título', 1542, 62);
+        ctx.fillStyle = '#cbd5e1';
+        ctx.font = '500 16px Arial, sans-serif';
+        ctx.fillText(`${data.expectedStart || 'Início não informado'}  •  ${data.expectedEnd || 'Término não informado'}`, 1542, 94);
+        ctx.fillStyle = '#dbeafe';
+        ctx.font = '700 13px Arial, sans-serif';
+        ctx.fillText('RESUMO EXECUTIVO', 1542, 124);
+        ctx.textAlign = 'left';
+
+        // Indicadores
+        const metricCard = (x, label, value, color) => {
+          roundedRect(x, 182, 250, 88, 12, '#ffffff', border);
+          ctx.fillStyle = color;
+          ctx.fillRect(x, 182, 250, 4);
+          ctx.fillStyle = muted;
+          ctx.font = '700 12px Arial, sans-serif';
+          ctx.fillText(label.toUpperCase(), x + 20, 211);
+          ctx.fillStyle = navy;
+          ctx.font = '800 30px Arial, sans-serif';
+          ctx.fillText(value, x + 20, 249);
+        };
+        metricCard(58, 'Total de atividades', `${total}`, '#2563eb');
+        metricCard(330, 'Progresso', `${roundedAverage}%`, '#7c3aed');
+        metricCard(602, 'Progresso geral', `${overallProgress}%`, '#16a34a');
+        metricCard(874, 'Modalidades', `${chartStatusData.length}`, '#ea580c');
+
+        // Painéis principais
+        roundedRect(58, 304, 610, 630, 16, '#ffffff', border);
+        roundedRect(696, 304, 846, 630, 16, '#ffffff', border);
+        ctx.fillStyle = navy;
+        ctx.font = '800 22px Arial, sans-serif';
+        ctx.fillText('Distribuição das atividades', 88, 350);
+        ctx.fillStyle = muted;
+        ctx.font = '500 15px Arial, sans-serif';
+        ctx.fillText('Quantidade de atividades por modalidade', 88, 377);
+        ctx.fillStyle = navy;
+        ctx.font = '800 22px Arial, sans-serif';
+        ctx.fillText('Detalhamento das modalidades', 726, 350);
+        ctx.fillStyle = muted;
+        ctx.font = '500 15px Arial, sans-serif';
+        ctx.fillText('Progresso e composição das atividades', 726, 377);
+
+        // Rosca
+        const cx = 362, cy = 615, radius = 220, inner = 137;
+        if (total === 0) {
+          ctx.beginPath(); ctx.arc(cx, cy, radius, 0, Math.PI * 2); ctx.arc(cx, cy, inner, 0, Math.PI * 2, true);
+          ctx.fillStyle = '#cbd5e1'; ctx.fill('evenodd');
+          ctx.fillStyle = navy; ctx.font = '800 24px Arial, sans-serif'; ctx.textAlign = 'center'; ctx.fillText('Sem atividades', cx, cy + 8); ctx.textAlign = 'left';
+        } else {
+          let start = -Math.PI / 2;
+          chartStatusData.forEach(item => {
+            if (!item.count) return;
+            const end = start + (item.count / total) * Math.PI * 2;
+            ctx.beginPath(); ctx.moveTo(cx, cy); ctx.arc(cx, cy, radius, start, end); ctx.closePath();
+            ctx.fillStyle = item.color; ctx.fill();
+            ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 5; ctx.stroke();
+            start = end;
+          });
+          ctx.beginPath(); ctx.arc(cx, cy, inner, 0, Math.PI * 2); ctx.fillStyle = '#ffffff'; ctx.fill();
+          ctx.fillStyle = navy; ctx.font = '800 52px Arial, sans-serif'; ctx.textAlign = 'center'; ctx.fillText(`${roundedAverage}%`, cx, cy + 8);
+          ctx.fillStyle = '#7c3aed'; ctx.font = '800 17px Arial, sans-serif'; ctx.fillText('PROGRESSO', cx, cy + 42); ctx.textAlign = 'left';
+        }
+        ctx.textAlign = 'left';
+
+        // Tabela refinada com as partes/status de cada modalidade
+        const tableX = 726, tableY = 446, rowH = 66;
+        const partLegend = [
+          { key: 'completed', label: 'Concluídas', color: '#16a34a' },
+          { key: 'inProgress', label: 'Em andamento', color: '#eab308' },
+          { key: 'notStarted', label: 'Não iniciadas', color: '#94a3b8' },
+          { key: 'delayed', label: 'Atrasadas', color: '#ef4444' },
+          { key: 'cancelled', label: 'Canceladas', color: '#f43f5e' }
+        ];
+        ctx.fillStyle = muted;
+        ctx.font = '700 11px Arial, sans-serif';
+        ctx.fillText('MODALIDADE', tableX + 18, tableY - 32);
+        ctx.fillText('PROGRESSO', tableX + 365, tableY - 32);
+        ctx.fillText('PARTES', tableX + 540, tableY - 32);
+        ctx.fillText('ATIVIDADES', tableX + 660, tableY - 32);
+        ctx.fillText('PARTICIPAÇÃO', tableX + 724, tableY - 32);
+
+        let legendX = tableX + 18;
+        partLegend.forEach(item => {
+          ctx.beginPath(); ctx.arc(legendX + 5, tableY - 8, 5, 0, Math.PI * 2); ctx.fillStyle = item.color; ctx.fill();
+          ctx.fillStyle = muted; ctx.font = '500 11px Arial, sans-serif'; ctx.fillText(item.label, legendX + 14, tableY - 4);
+          legendX += item.label === 'Em andamento' ? 116 : item.label === 'Não iniciadas' ? 110 : 94;
+        });
+
+        const wrapText = (text, x, y, maxWidth, lineHeight) => {
+          const words = String(text).split(' ');
+          let line = '';
+          let lineIndex = 0;
+          words.forEach(word => {
+            const testLine = line ? `${line} ${word}` : word;
+            if (ctx.measureText(testLine).width > maxWidth && line) {
+              ctx.fillText(line, x, y + lineIndex * lineHeight);
+              line = word;
+              lineIndex += 1;
+            } else line = testLine;
+          });
+          if (line) ctx.fillText(line, x, y + lineIndex * lineHeight);
+        };
+
+        chartStatusData.forEach((item, index) => {
+          const y = tableY + index * rowH;
+          ctx.fillStyle = index % 2 === 0 ? '#f8fafc' : '#ffffff';
+          ctx.fillRect(tableX, y - 28, 786, 55);
+          ctx.strokeStyle = '#f1f5f9'; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(tableX, y + 27); ctx.lineTo(tableX + 786, y + 27); ctx.stroke();
+          ctx.beginPath(); ctx.arc(tableX + 20, y - 4, 8, 0, Math.PI * 2); ctx.fillStyle = item.color; ctx.fill();
+          ctx.fillStyle = navy; ctx.font = '700 16px Arial, sans-serif';
+          wrapText(item.label, tableX + 38, y + 2, 310, 17);
+
+          // Barra de progresso com a cor da própria modalidade.
+          ctx.fillStyle = item.color; ctx.font = '800 17px Arial, sans-serif';
+          ctx.fillText(`${item.progress}%`, tableX + 365, y + 2);
+          ctx.fillStyle = '#e2e8f0'; ctx.fillRect(tableX + 365, y + 14, 145, 8);
+          ctx.fillStyle = item.color; ctx.fillRect(tableX + 365, y + 14, Math.max(0, Math.min(145, item.progress * 1.45)), 8);
+
+          // Barra empilhada mostrando as partes da modalidade por status.
+          const partsX = tableX + 540, partsW = 112;
+          let partOffset = 0;
+          partLegend.forEach(part => {
+            const partCount = item.statusCounts?.[part.key] || 0;
+            if (!partCount || !item.count) return;
+            const segmentW = partsW * (partCount / item.count);
+            ctx.fillStyle = part.color;
+            ctx.fillRect(partsX + partOffset, y - 10, segmentW, 14);
+            partOffset += segmentW;
+          });
+          if (!item.count) { ctx.fillStyle = '#e2e8f0'; ctx.fillRect(partsX, y - 10, partsW, 14); }
+
+          ctx.fillStyle = navy; ctx.font = '800 17px Arial, sans-serif';
+          ctx.fillText(`${item.count}`, tableX + 660, y + 2);
+          ctx.fillStyle = muted; ctx.font = '600 15px Arial, sans-serif';
+          ctx.fillText(`${total ? Math.round(item.count / total * 100) : 0}%`, tableX + 724, y + 2);
+        });
+
+        ctx.fillStyle = muted;
+        ctx.font = '500 13px Arial, sans-serif';
+        ctx.fillText('As barras coloridas seguem a modalidade; as partes mostram a composição por status.', 58, 974);
+        ctx.fillText('Gerado pelo Farol Pro', 1542, 974);
+        ctx.textAlign = 'right';
+      };
+
+      useEffect(() => {
+        if (!showChartModal) return;
+        const frame = requestAnimationFrame(drawActivityChart);
+        return () => cancelAnimationFrame(frame);
+      }, [showChartModal, data.tasks, averagePercentage, overallProgress]);
+
+      const saveChartImage = () => {
+        drawActivityChart();
+        chartCanvasRef.current?.toBlob(blob => {
+          if (blob) downloadFile(blob, `farol-pro-grafico-${new Date().toISOString().slice(0, 10)}.png`);
+        }, 'image/png');
+      };
+
+      const shareChartImage = async () => {
+        drawActivityChart();
+        chartCanvasRef.current?.toBlob(async blob => {
+          if (!blob) return;
+          const file = new File([blob], `farol-pro-grafico-${new Date().toISOString().slice(0, 10)}.png`, { type: 'image/png' });
+          try {
+            if (navigator.canShare && navigator.canShare({ files: [file] })) {
+              await navigator.share({ files: [file], title: 'Gráfico Farol Pro', text: 'Análise de atividades da manutenção.' });
+            } else {
+              downloadFile(blob, file.name);
+            }
+          } catch (error) {
+            if (error?.name !== 'AbortError') downloadFile(blob, file.name);
+          }
+        }, 'image/png');
+      };
+
+      const shareCompleteReport = async () => {
+        drawActivityChart();
+        const statusText = [
+          `*STATUS DAS ATIVIDADES — ${(data.title || 'MANUTENÇÃO').toUpperCase()}*`,
+          `🟢 ${summary.completed}/${summary.total} concluídas`,
+          `🟡 ${summary.inProgress}/${summary.total} em andamento`,
+          `⚪ ${summary.notStarted}/${summary.total} não iniciadas`,
+          `🔴 ${summary.delayed}/${summary.total} atrasadas`,
+          `❌ ${summary.cancelled}/${summary.total} canceladas`
+        ].join('\n');
+        const text = `${buildWppText()}\n\n${statusText}`;
+        chartCanvasRef.current?.toBlob(async blob => {
+          if (!blob) return;
+          const file = new File([blob], `farol-pro-${new Date().toISOString().slice(0, 10)}.png`, { type: 'image/png' });
+          try {
+            if (navigator.canShare && navigator.canShare({ files: [file] })) {
+              await navigator.share({ files: [file], title: `Farol Pro — ${data.title || 'Manutenção'}`, text });
+              setSummaryMessage('Farol, gráfico e status compartilhados.');
+            } else {
+              copyToClipboardHelper(text);
+              downloadFile(blob, file.name);
+              setSummaryMessage('Texto copiado e gráfico salvo para compartilhar.');
+            }
+          } catch (error) {
+            if (error?.name !== 'AbortError') {
+              copyToClipboardHelper(text);
+              downloadFile(blob, file.name);
+              setSummaryMessage('Texto copiado e gráfico salvo para compartilhar.');
+            }
+          }
+          setTimeout(() => setSummaryMessage(''), 3000);
+        }, 'image/png');
+      };
+
+      const shareSummary = async () => {
+        const total = summary.total;
+        const text = [
+          `*STATUS DAS ATIVIDADES — ${(data.title || 'MANUTENÇÃO').toUpperCase()}*`,
+          '',
+          `🟢 ${summary.completed}/${total} concluídas`,
+          `🟡 ${summary.inProgress}/${total} em andamento`,
+          `⚪ ${summary.notStarted}/${total} não iniciadas`,
+          `🔴 ${summary.delayed}/${total} atrasadas`,
+          `❌ ${summary.cancelled}/${total} canceladas`
+        ].filter(Boolean).join('\n');
+        try {
+          if (navigator.share) {
+            await navigator.share({ title: `Status — ${data.title || 'Farol Pro'}`, text });
+            setSummaryMessage('Status compartilhado.');
+          } else {
+            copyToClipboardHelper(text);
+            setSummaryMessage('Status copiado para compartilhar.');
+          }
+        } catch (error) {
+          if (error?.name !== 'AbortError') {
+            copyToClipboardHelper(text);
+            setSummaryMessage('Status copiado para compartilhar.');
+          }
+        }
+        setTimeout(() => setSummaryMessage(''), 2500);
+      };
+
+      const handleBackupFile = (event) => {
+        const file = event.target.files?.[0];
+        event.target.value = '';
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+          try {
+            const parsed = JSON.parse(reader.result);
+            const importedData = parsed.data || parsed;
+            if (!importedData || !Array.isArray(importedData.tasks)) throw new Error('backup inválido');
+            const safeData = {
+              title: importedData.title || '',
+              expectedStart: importedData.expectedStart || '',
+              expectedEnd: importedData.expectedEnd || '',
+              tasks: importedData.tasks
+            };
+            updateAndSave(safeData);
+            if (Array.isArray(parsed.templates)) setTemplates(parsed.templates);
+            setBackupMessage('Backup importado.');
+            setTimeout(() => setBackupMessage(''), 2500);
+          } catch (error) {
+            setBackupMessage('Não foi possível importar esse backup.');
+            setTimeout(() => setBackupMessage(''), 3000);
+          }
+        };
+        reader.readAsText(file);
+      };
+
+      const addSection = () => {
+        if (!newSectionName.trim()) return;
+        const newSection = { id: Date.now().toString(), isSection: true, name: newSectionName.trim().toUpperCase().replace(/\*/g, ''), status: 'none', startTime: '', endTime: '', duration: '', startTimeMs: null, endTimeMs: null };
+        updateAndSave(prev => ({ ...prev, tasks: [...prev.tasks, newSection] }));
+        setNewSectionName('');
+      };
+
+      const handleAddSectionTask = (sectionId) => {
+        const rawText = sectionInputs[sectionId];
+        if (!rawText || !rawText.trim()) return;
+        const lines = rawText.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+        if (lines.length === 0) return;
+
+        updateAndSave(prev => {
+          const sectionIndex = prev.tasks.findIndex(t => t.id === sectionId);
+          if (sectionIndex === -1) return prev;
+          let insertIndex = sectionIndex + 1;
+          while (insertIndex < prev.tasks.length && !prev.tasks[insertIndex].isSection) insertIndex++;
+
+          const newTasksAdded = lines.map((line, idx) => {
+            const isSub = line.match(/^[-▫️▪️◾]/);
+            const cleanName = line.replace(/^[-▫️▪️◾]\s*/, '');
+            return {
+                id: (Date.now() + idx).toString(), isSection: false, name: cleanName, status: isSub ? '▪️' : '⚪', startTime: '', endTime: '', duration: '', progress: '', startTimeMs: null, endTimeMs: null
+            };
+          });
+
+          const newTasks = [...prev.tasks];
+          newTasks.splice(insertIndex, 0, ...newTasksAdded);
+          return { ...prev, tasks: newTasks };
+        });
+        setSectionInputs(prev => ({ ...prev, [sectionId]: '' }));
+      };
+
+      const handleTaskPaste = (e, taskId, index, currentText) => {
+        const paste = e.clipboardData.getData('text');
+        if (paste.includes('\n')) {
+          e.preventDefault();
+          const lines = paste.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+          if (lines.length === 0) return;
+
+          updateAndSave(prev => {
+            const newTasks = [...prev.tasks];
+            const taskIndex = newTasks.findIndex(t => t.id === taskId);
+            if (taskIndex !== -1) newTasks[taskIndex] = { ...newTasks[taskIndex], name: currentText + lines[0] };
+
+            if (lines.length > 1) {
+              const newTasksAdded = lines.slice(1).map((line, idx) => {
+                const isSub = line.match(/^[-▫️▪️◾]/);
+                const cleanName = line.replace(/^[-▫️▪️◾]\s*/, '');
+                return {
+                    id: (Date.now() + idx).toString(), isSection: false, name: cleanName, status: isSub ? '▪️' : '⚪', startTime: '', endTime: '', duration: '', progress: '', startTimeMs: null, endTimeMs: null
+                };
+              });
+              newTasks.splice(index + 1, 0, ...newTasksAdded);
+            }
+            return { ...prev, tasks: newTasks };
+          });
+        }
+      };
+
+      const clearSectionTasks = (sectionId) => {
+        updateAndSave(prev => {
+          const newTasks = [];
+          let skip = false;
+          for (let i = 0; i < prev.tasks.length; i++) {
+            const task = prev.tasks[i];
+            if (task.id === sectionId) { newTasks.push(task); skip = true; continue; }
+            if (skip) { if (task.isSection) { skip = false; newTasks.push(task); } } else { newTasks.push(task); }
+          }
+          return { ...prev, tasks: newTasks };
+        });
+      };
+
+      const offerUndo = (message, restore) => {
+        clearTimeout(undoTimerRef.current);
+        setUndoAction({ message, restore });
+        undoTimerRef.current = setTimeout(() => setUndoAction(null), 6000);
+      };
+
+      const undoLastAction = () => {
+        if (!undoAction) return;
+        clearTimeout(undoTimerRef.current);
+        const action = undoAction;
+        setUndoAction(null);
+        action.restore();
+      };
+
+      const removeTask = (taskId) => {
+        const removedIndex = data.tasks.findIndex(task => task.id === taskId);
+        const removedTask = removedIndex >= 0 ? data.tasks[removedIndex] : null;
+        if (!removedTask) return;
+        updateAndSave(prev => ({ ...prev, tasks: prev.tasks.filter(t => t.id !== taskId) }));
+        offerUndo('Tarefa excluída.', () => updateAndSave(prev => {
+          if (prev.tasks.some(task => task.id === removedTask.id)) return prev;
+          const tasks = [...prev.tasks];
+          const insertAt = Math.min(removedIndex, tasks.length);
+          tasks.splice(insertAt, 0, removedTask);
+          return { ...prev, tasks };
+        }));
+      };
+
+      const removeSectionWithTasks = (sectionId) => {
+        updateAndSave(prev => {
+          const newTasks = [];
+          let skipping = false;
+          for (let i = 0; i < prev.tasks.length; i++) {
+            const t = prev.tasks[i];
+            if (t.id === sectionId) { skipping = true; continue; }
+            if (skipping) { if (t.isSection) { skipping = false; newTasks.push(t); } } else { newTasks.push(t); }
+          }
+          return { ...prev, tasks: newTasks };
+        });
+      };
+
+      const moveSectionBlock = (sectionIndex, direction) => {
+        updateAndSave(prev => {
+          const tasks = [...prev.tasks];
+          const sections = [];
+          let i = 0;
+          while (i < tasks.length) {
+            if (tasks[i].isSection) {
+              const sIndex = i;
+              let eIndex = i + 1;
+              while (eIndex < tasks.length && !tasks[eIndex].isSection) eIndex++;
+              sections.push({ start: sIndex, end: eIndex, items: tasks.slice(sIndex, eIndex) });
+              i = eIndex;
+            } else { i++; }
+          }
+          const currentSecIndex = sections.findIndex(s => s.start === sectionIndex);
+          const targetSecIndex = direction === 'up' ? currentSecIndex - 1 : currentSecIndex + 1;
+          if (targetSecIndex < 0 || targetSecIndex >= sections.length) return prev;
+          [sections[currentSecIndex], sections[targetSecIndex]] = [sections[targetSecIndex], sections[currentSecIndex]];
+          const newTasksList = [];
+          sections.forEach(sec => newTasksList.push(...sec.items));
+          return { ...prev, tasks: newTasksList };
+        });
+      };
+
+      const moveTask = (index, direction) => {
+        updateAndSave(prev => {
+          const newTasks = [...prev.tasks];
+          const targetIndex = direction === 'up' ? index - 1 : index + 1;
+          if (targetIndex < 0 || targetIndex >= newTasks.length || newTasks[targetIndex].isSection || newTasks[index].isSection) return prev;
+          [newTasks[index], newTasks[targetIndex]] = [newTasks[targetIndex], newTasks[index]];
+          return { ...prev, tasks: newTasks };
+        });
+      };
+
+      const handleDragStart = (e, index) => { e.dataTransfer.setData('text/plain', index); e.dataTransfer.effectAllowed = 'move'; };
+      const handleDragOver = (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; };
+
+      const handleDrop = (e, targetDropIndex) => {
+        e.preventDefault();
+        const draggedIndex = parseInt(e.dataTransfer.getData('text/plain'), 10);
+        if (isNaN(draggedIndex) || draggedIndex === targetDropIndex) return;
+
+        updateAndSave(prev => {
+          const tasks = [...prev.tasks];
+          const draggedItem = tasks[draggedIndex];
+
+          if (draggedItem.isSection) {
+            let blockEnd = draggedIndex + 1;
+            while (blockEnd < tasks.length && !tasks[blockEnd].isSection) blockEnd++;
+            const blockLength = blockEnd - draggedIndex;
+            const block = tasks.slice(draggedIndex, blockEnd);
+
+            tasks.splice(draggedIndex, blockLength);
+            let adjustedTargetDropIndex = targetDropIndex;
+            if (draggedIndex < targetDropIndex) adjustedTargetDropIndex -= blockLength;
+
+            let insertSectionIndex = adjustedTargetDropIndex;
+            while (insertSectionIndex >= 0 && !tasks[insertSectionIndex]?.isSection) insertSectionIndex--;
+            if (insertSectionIndex < 0) insertSectionIndex = 0;
+
+            if (draggedIndex < targetDropIndex) {
+               let targetBlockEnd = insertSectionIndex + 1;
+               while (targetBlockEnd < tasks.length && !tasks[targetBlockEnd].isSection) targetBlockEnd++;
+               insertSectionIndex = targetBlockEnd;
+            }
+
+            tasks.splice(insertSectionIndex, 0, ...block);
+            return { ...prev, tasks };
+          } else {
+            const [movedItem] = tasks.splice(draggedIndex, 1);
+            let insertIndex = targetDropIndex;
+            if (draggedIndex < targetDropIndex) insertIndex -= 1;
+            tasks.splice(insertIndex, 0, movedItem);
+            return { ...prev, tasks };
+          }
+        });
+      };
+
+      const copyToClipboardHelper = (text) => {
+        const textArea = document.createElement("textarea");
+        textArea.value = text;
+        document.body.appendChild(textArea);
+        textArea.select();
+        try { 
+          document.execCommand('copy'); 
+          setCopySuccess(true); 
+          setTimeout(() => setCopySuccess(false), 2000); 
+        } catch (err) { 
+          // Silently fail if copy is not supported rather than showing an alert
+          console.error("Erro ao copiar.");
+        }
+        document.body.removeChild(textArea);
+      };
+
+      const toggleWppMode = () => {
+         if (wppMode === 'DURACAO_AUTO') setWppMode('COM_HORAS');
+         else if (wppMode === 'COM_HORAS') setWppMode('SEM_HORAS');
+         else setWppMode('DURACAO_AUTO');
+      };
+
+      const getWppButtonLabel = () => {
+         if (wppMode === 'DURACAO_AUTO') return 'WPP: Duração Auto';
+         if (wppMode === 'COM_HORAS') return 'WPP: Com Horas';
+         return 'WPP: Sem Horas';
+      };
+
+      const formatTaskForWpp = (task) => {
+          const statusIcon = task.status === 'none' ? '' : task.status;
+          let taskLine = '';
+          
+          if (task.status === '🟡' && task.progress) taskLine = `🟡 ${task.name} - ${task.progress}%`;
+          else taskLine = `${statusIcon} ${task.name}`;
+
+          let resultText = '';
+
+          // Sub-item não recebe horas automáticas da gaveta no WPP
+          if (task.status === '▪️' || task.status === '▫️' || task.status === '◾') {
+              return taskLine + "\n";
+          }
+
+          if (wppMode === 'DURACAO_AUTO') {
+             if ((task.status === '🟡' || task.status === '🟢') && task.startTimeMs) {
+                 const liveStr = getLiveDurationString(task.startTimeMs, task.endTimeMs, task.status);
+                 if (liveStr) taskLine += ` (${liveStr})`;
+             }
+             resultText = taskLine + "\n";
+          } else if (wppMode === 'COM_HORAS') {
+             resultText = taskLine + "\n";
+             const dur = task.duration || getLiveDurationString(task.startTimeMs, task.endTimeMs, task.status);
+             const st = task.startTime || formatTimeString(task.startTimeMs);
+             const et = task.endTime || formatTimeString(task.endTimeMs);
+             
+             if (st) resultText += `▪️ Início: ${st}\n`;
+             if (et) resultText += `▪️ Término: ${et}\n`;
+             if (dur) resultText += `▪️ Duração: ${dur}\n`;
+          } else {
+             resultText = taskLine + "\n";
+          }
+          return resultText;
+      };
+
+      const buildWppText = () => {
+        let text = `*${data.title.toUpperCase()}*\n\n`;
+        if (data.expectedStart) text += `📅 Início Previsto - ${data.expectedStart}\n`;
+        if (data.expectedEnd) text += `📅 Término Previsto - ${data.expectedEnd}\n\n`;
+
+        data.tasks.forEach((task, index) => {
+          if (task.isSection) {
+            const pct = sectionProgress[task.id] || 0;
+            if (index > 0) text += `\n`;
+            text += `${task.name.toUpperCase()} - ${pct}%\n\n`;
+          } else {
+            text += formatTaskForWpp(task);
+          }
+        });
+
+        text += `\nLegenda:\n\n⚪ Não iniciado\n🟡 Em andamento\n🟢 Concluído\n🔴 Atrasado\n❌ Cancelado`;
+        return text;
+      };
+
+      const copyToWhatsApp = () => copyToClipboardHelper(buildWppText());
+
+      const processSmartImport = () => {
+        if (!importText.trim()) return;
+        let parsedTitle = "", parsedStart = "", parsedEnd = "", newTasks = [], currentTask = null;
+        const lines = importText.split('\n');
+        
+        for (let i = 0; i < lines.length; i++) {
+          let line = lines[i].trim();
+          if (!line || line === 'Legenda:' || line.match(/⚪.? Não iniciado/i)) { 
+              if (line === 'Legenda:' || line.match(/⚪.? Não iniciado/i)) break; 
+              continue; 
+          }
+          
+          if (line.match(/Início [pP]revisto/i)) { parsedStart = line.split(/Início [pP]revisto\s*[:-]?\s*/i)[1]?.trim() || parsedStart; continue; }
+          if (line.match(/Término [pP]revisto/i)) { parsedEnd = line.split(/Término [pP]revisto\s*[:-]?\s*/i)[1]?.trim() || parsedEnd; continue; }
+
+          // Horários exportados pelo modo "WPP: Com Horas" voltam para a tarefa principal.
+          const detailMatch = line.match(/^▪️\s*(In[ií]cio|Término|Duração)\s*:\s*(.*)$/i);
+          if (detailMatch && currentTask) {
+            const detailValue = detailMatch[2].trim();
+            if (/^In[ií]cio$/i.test(detailMatch[1])) currentTask.startTime = detailValue;
+            else if (/^Término$/i.test(detailMatch[1])) currentTask.endTime = detailValue;
+            else currentTask.duration = detailValue;
+            continue;
+          }
+          
+          // SEÇÕES
+          if (!line.match(/^(⚪|🟡|🟢|🔴|❌|▫️|▪️|◾|📅|📆)/)) {
+             if (!parsedTitle && newTasks.length === 0) {
+                 parsedTitle = line.replace(/\*/g, '').trim();
+             } else {
+                 currentTask = null;
+                 newTasks.push({ id: Date.now().toString(36) + Math.random().toString(36).substr(2), isSection: true, name: line.replace(/\*/g, '').replace(/-\s*\d+%$/, '').trim(), status: 'none', startTime: '', endTime: '', duration: '', progress: '', startTimeMs: null, endTimeMs: null });
+             }
+             continue;
+          }
+          
+          // TAREFAS e SUB-ITENS REAIS
+          const statusMatch = line.match(/^(⚪|🟡|🟢|🔴|❌|▫️|▪️|◾)\s*(.*)/);
+          if (statusMatch) {
+             let nameVal = statusMatch[2].trim();
+             let prog = '';
+             let sTimeMs = null, eTimeMs = null;
+             
+             // Time Travel (Engenharia Reversa) apenas se for uma tarefa principal (🟡 ou 🟢)
+             if (statusMatch[1] === '🟡' || statusMatch[1] === '🟢') {
+                 // Procura por (XXhXXm), (XXh), (XXm) ou até (0m) no final do nome
+                 const timeMatch = nameVal.match(/\(\s*(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*\)$/i);
+                 if (timeMatch) {
+                     const h = parseInt(timeMatch[1]) || 0;
+                     const m = parseInt(timeMatch[2]) || 0;
+                     const totalMs = ((h * 60) + m) * 60000;
+                     
+                     if (totalMs >= 0) {
+                         sTimeMs = Date.now() - totalMs; 
+                         if (statusMatch[1] === '🟢') { eTimeMs = Date.now(); }
+                     }
+                     // Apaga as horas do nome
+                     nameVal = nameVal.replace(timeMatch[0], '').trim();
+                 } else if (statusMatch[1] === '🟡') {
+                     sTimeMs = Date.now(); // Inicia agora se não tiver tempo
+                 }
+                 
+                 // Apaga a percentagem do nome
+                 if (statusMatch[1] === '🟡' && nameVal.includes('%')) {
+                     const pctMatch = nameVal.match(/-\s*([0-9.,]+)%$/);
+                     if (pctMatch) { prog = pctMatch[1]; nameVal = nameVal.replace(pctMatch[0], '').trim(); }
+                 }
+             }
+
+             nameVal = nameVal.replace(/\s*-\s*$/, '').trim();
+
+             // Se for um sub-item real do WhatsApp (▪️, ◾, ▫️), usa o quadrado preto
+             const iconToUse = (statusMatch[1] === '▪️' || statusMatch[1] === '◾' || statusMatch[1] === '▫️') ? '▪️' : statusMatch[1];
+
+             currentTask = { 
+                 id: Date.now().toString(36) + Math.random().toString(36).substr(2), 
+                 isSection: false, 
+                 name: nameVal, 
+                 status: iconToUse, 
+                 startTime: formatTimeString(sTimeMs), 
+                 endTime: formatTimeString(eTimeMs), 
+                 duration: '', 
+                 progress: prog,
+                 startTimeMs: sTimeMs,
+                 endTimeMs: eTimeMs
+             };
+             newTasks.push(currentTask);
+             continue;
+          }
+        }
+
+        updateAndSave({ title: parsedTitle || 'PREVENTIVA IMPORTADA', expectedStart: parsedStart || data.expectedStart, expectedEnd: parsedEnd || data.expectedEnd, tasks: newTasks });
+        closeModal();
+      };
+
+      const downloadPdf = async () => {
+        if (!window.html2pdf) return;
+        setIsGeneratingPdf(true);
+        const opt = { 
+          margin: [8, 8, 8, 8], 
+          filename: `${(pdfCustomTitle || 'relatorio').replace(/[/\\?%*:|"<>]/g, '_')}.pdf`, 
+          image: { type: 'jpeg', quality: 0.98 }, 
+          html2canvas: { scale: 2, useCORS: true, letterRendering: true, scrollY: 0, windowY: 0 }, 
+          jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }, 
+          pagebreak: { mode: ['avoid-all', 'css', 'legacy'] } 
+        };
+        try {
+          const pdfBlob = await window.html2pdf().from(pdfContentRef.current).set(opt).output('blob');
+          const file = new File([pdfBlob], opt.filename, { type: 'application/pdf' });
+          if (navigator.canShare && navigator.canShare({ files: [file] })) {
+             await navigator.share({ files: [file], title: 'Relatório Farol Pro', text: 'Relatório de manutenção exportado.' });
+          } else {
+             const url = URL.createObjectURL(pdfBlob);
+             const a = document.createElement('a'); a.href = url; a.download = opt.filename; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+          }
+        } catch (err) { console.error('Erro ao processar PDF.'); } finally { setIsGeneratingPdf(false); setShowPdfModal(false); }
+      };
+
+      const openModal = (type, modalData = null) => { setPromptInput(''); setImportText(''); setTemplateSearch(''); setModal({ isOpen: true, type, data: modalData }); setShowMenuDropdown(false); };
+      const closeModal = () => setModal({ isOpen: false, type: '', data: null });
+
+      const confirmClearBoard = () => {
+        const previousData = data;
+        updateAndSave({ title: '', expectedStart: '', expectedEnd: '', tasks: [] });
+        offerUndo('Lista limpa.', () => updateAndSave(previousData));
+        setExpandedTasks({}); setNewSectionName(''); closeModal();
+      };
+      const confirmClearSection = () => {
+        if (modal.data && modal.data.id) {
+          const previousData = data;
+          clearSectionTasks(modal.data.id);
+          offerUndo('Tarefas do tópico removidas.', () => updateAndSave(previousData));
+        }
+        closeModal();
+      };
+      const confirmDeleteSection = () => {
+        if (modal.data && modal.data.id) {
+          const previousData = data;
+          removeSectionWithTasks(modal.data.id);
+          offerUndo('Tópico removido.', () => updateAndSave(previousData));
+        }
+        closeModal();
+      };
+      const confirmSaveTemplate = async () => { if (!promptInput.trim()) return; const newTemplate = { id: Date.now().toString(), name: promptInput.toUpperCase(), data: { title: promptInput.toUpperCase(), expectedStart: data.expectedStart?.toUpperCase() || '', expectedEnd: data.expectedEnd?.toUpperCase() || '', tasks: data.tasks.map(t => ({ ...t, status: (t.status === '▪️' || t.status === '▫️') ? '▪️' : (t.isSection ? 'none' : '⚪'), startTime: '', endTime: '', duration: '', progress: '', startTimeMs: null, endTimeMs: null })) } }; setTemplates(prev => [...prev, newTemplate]); closeModal(); };
+      const confirmLoadTemplate = () => { updateAndSave({ title: modal.data.data.title, expectedStart: modal.data.data.expectedStart || '', expectedEnd: modal.data.data.expectedEnd || '', tasks: modal.data.data.tasks.map(t => ({ ...t, status: (t.status === '▪️' || t.status === '▫️') ? '▪️' : (t.isSection ? 'none' : '⚪'), startTime: '', endTime: '', duration: '', progress: '', startTimeMs: null, endTimeMs: null })) }); setShowTemplates(false); setExpandedTasks({}); closeModal(); };
+      
+      const confirmSetPercentage = () => {
+        const cleanPct = promptInput.replace('%', '').trim();
+        
+        if (parseFloat(cleanPct) === 100) {
+            updateAndSave(prevData => {
+                const newTasks = prevData.tasks.map(task => {
+                    if (task.id === modal.data.id) {
+                        const updated = { ...task, progress: cleanPct, status: '🟢' };
+                        // Congela o tempo automaticamente ao concluir
+                        if (!updated.startTimeMs) { updated.startTimeMs = Date.now(); updated.startTime = formatTimeString(updated.startTimeMs); }
+                        if (!updated.endTimeMs) { updated.endTimeMs = Date.now(); updated.endTime = formatTimeString(updated.endTimeMs); }
+                        return updated;
+                    }
+                    return task;
+                });
+                return { ...prevData, tasks: newTasks };
+            });
+        } else {
+            updateTaskField(modal.data.id, 'progress', cleanPct);
+        }
+        closeModal();
+      };
+
+      const currentZoomClass = { 1: 'text-[12px]', 2: 'text-[14px]', 3: 'text-[16px]', 4: 'text-[18px]' }[zoomLevel];
+
+      const theme = {
+        bg: darkMode ? 'bg-[#060913]' : 'bg-[#f1f5f9]',
+        cardBg: darkMode ? 'bg-[#0f172a] shadow-lg shadow-black/40' : 'bg-white shadow-md shadow-slate-300/60',
+        text: darkMode ? 'text-slate-100' : 'text-slate-900',
+        textMuted: darkMode ? 'text-slate-400' : 'text-slate-600',
+        border: darkMode ? 'border-slate-800/80' : 'border-slate-300',
+        inputBg: darkMode ? 'bg-[#1e293b]/60' : 'bg-slate-100',
+        hover: darkMode ? 'hover:bg-slate-800/60' : 'hover:bg-slate-200/70',
+        sectionBg: darkMode ? 'bg-gradient-to-r from-[#172554]/80 to-[#0f172a] border-l-4 border-blue-500 shadow-sm' : 'bg-blue-50/80 border-l-4 border-blue-600 shadow-sm border-y border-r border-slate-300',
+        sectionText: darkMode ? 'text-blue-400 font-extrabold uppercase tracking-wide' : 'text-blue-800 font-extrabold uppercase tracking-wide',
+        taskCard: darkMode ? 'bg-[#11192b]' : 'bg-white',
+        headerBg: darkMode ? 'bg-[#060913]/90 backdrop-blur-xl' : 'bg-white/90 backdrop-blur-xl',
+        badgeBg: darkMode ? 'bg-yellow-500/20 text-yellow-400 border-yellow-500/40' : 'bg-yellow-100 text-yellow-700 border-yellow-400/50'
+      };
+
+      const filteredTemplates = templates.filter(t => t.name.toLowerCase().includes(templateSearch.toLowerCase()));
+
+      return (
+        <div className={`min-h-screen ${theme.bg} ${theme.text} pb-24 ${currentZoomClass} transition-colors`}>
+          
+          {}
+          {modal.isOpen && (
+            <div className="fixed inset-0 bg-black/80 z-[100] flex items-center justify-center p-3 backdrop-blur-sm">
+              <div className={`${theme.cardBg} border ${theme.border} p-5 rounded-2xl shadow-2xl w-full max-w-sm`}>
+                {modal.type === 'CLEAR_ALL' && (
+                  <>
+                    <h3 className="font-bold text-base mb-2 text-rose-500">Excluir Tudo?</h3>
+                    <p className={`mb-5 text-sm ${theme.textMuted}`}>Isto vai limpar toda a lista atual permanentemente.</p>
+                    <div className="flex justify-end gap-2.5">
+                      <button onClick={closeModal} className="px-4 py-2 rounded-xl text-sm font-semibold bg-slate-700/50 hover:bg-slate-700 text-white transition-all">Cancelar</button>
+                      <button onClick={confirmClearBoard} className="px-4 py-2 rounded-xl text-sm font-semibold bg-rose-600 hover:bg-rose-700 text-white transition-all">Excluir</button>
+                    </div>
+                  </>
+                )}
+                {modal.type === 'CLEAR_SECTION' && (
+                  <>
+                    <h3 className="font-bold text-base mb-2 text-rose-500">Limpar Tarefas?</h3>
+                    <p className={`mb-5 text-sm ${theme.textMuted}`}>Deseja apagar as tarefas do tópico <b>"{modal.data?.name}"</b>?</p>
+                    <div className="flex justify-end gap-2.5">
+                      <button onClick={closeModal} className="px-4 py-2 rounded-xl text-sm font-semibold bg-slate-700/50 hover:bg-slate-700 text-white transition-all">Cancelar</button>
+                      <button onClick={confirmClearSection} className="px-4 py-2 rounded-xl text-sm font-semibold bg-rose-600 hover:bg-rose-700 text-white transition-all">Limpar</button>
+                    </div>
+                  </>
+                )}
+                {modal.type === 'DELETE_SECTION' && (
+                  <>
+                    <h3 className="font-bold text-base mb-2 text-rose-500">Excluir Tópico?</h3>
+                    <p className={`mb-5 text-sm ${theme.textMuted}`}>Deseja apagar o tópico <b>"{modal.data?.name}"</b> e <b>TODAS</b> as suas tarefas?</p>
+                    <div className="flex justify-end gap-2.5">
+                      <button onClick={closeModal} className="px-4 py-2 rounded-xl text-sm font-semibold bg-slate-700/50 hover:bg-slate-700 text-white transition-all">Cancelar</button>
+                      <button onClick={confirmDeleteSection} className="px-4 py-2 rounded-xl text-sm font-semibold bg-rose-600 hover:bg-rose-700 text-white transition-all">Excluir</button>
+                    </div>
+                  </>
+                )}
+                {modal.type === 'SAVE_TEMPLATE' && (
+                  <>
+                    <h3 className="font-bold text-base mb-2">Guardar Modelo</h3>
+                    <input type="text" autoFocus value={promptInput} onChange={e => setPromptInput(e.target.value.toUpperCase())} className={`w-full p-3 rounded-xl mb-4 border ${theme.border} ${theme.inputBg} text-sm uppercase font-semibold focus:outline-none focus:border-blue-500`} placeholder="NOME DO MODELO..." />
+                    <div className="flex justify-end gap-2.5">
+                      <button onClick={closeModal} className="px-4 py-2 rounded-xl text-sm font-semibold bg-slate-700/50 hover:bg-slate-700 text-white transition-all">Cancelar</button>
+                      <button onClick={confirmSaveTemplate} className="px-4 py-2 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-700 text-white transition-all">Guardar</button>
+                    </div>
+                  </>
+                )}
+                {modal.type === 'LOAD_TEMPLATE' && (
+                  <>
+                    <h3 className="font-bold text-base mb-2">Carregar Lista?</h3>
+                    <p className={`mb-5 text-sm ${theme.textMuted}`}>Carregar o modelo <b>"{modal.data?.name}"</b> vai substituir a lista atual.</p>
+                    <div className="flex justify-end gap-2.5">
+                      <button onClick={closeModal} className="px-4 py-2 rounded-xl text-sm font-semibold bg-slate-700/50 hover:bg-slate-700 text-white transition-all">Cancelar</button>
+                      <button onClick={confirmLoadTemplate} className="px-4 py-2 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-700 text-white transition-all">Carregar</button>
+                    </div>
+                  </>
+                )}
+                {modal.type === 'IMPORT_WPP' && (
+                  <>
+                    <h3 className="font-bold text-base mb-2">📥 Importar do WPP</h3>
+                    <p className={`mb-3 text-xs ${theme.textMuted}`}>Cole a lista completa copiada do WhatsApp para organizar automaticamente.</p>
+                    <textarea 
+                      rows={6}
+                      value={importText}
+                      onChange={e => setImportText(e.target.value)}
+                      className={`w-full p-3 rounded-xl mb-4 border ${theme.border} ${theme.inputBg} text-xs font-semibold focus:outline-none focus:border-blue-500 whitespace-pre-wrap`} 
+                      placeholder="*MP VV-03*&#10;&#10;📆 Início previsto...&#10;🟡 Tarefa..." 
+                    />
+                    <div className="flex justify-end gap-2.5">
+                      <button onClick={closeModal} className="px-4 py-2 rounded-xl text-sm font-semibold bg-slate-700/50 hover:bg-slate-700 text-white transition-all">Cancelar</button>
+                      <button onClick={processSmartImport} className="px-4 py-2 rounded-xl text-sm font-semibold bg-blue-600 hover:bg-blue-700 text-white transition-all shadow-md">Carregar Dados</button>
+                    </div>
+                  </>
+                )}
+                {modal.type === 'SET_PERCENTAGE' && (
+                  <>
+                    <h3 className="font-bold text-lg mb-2 text-center text-yellow-500">Definir Percentagem</h3>
+                    <p className={`mb-5 text-sm text-center ${theme.textMuted}`}>Progresso da tarefa (ex: 34, 100):</p>
+                    <input 
+                      type="number" autoFocus value={promptInput} onChange={e => setPromptInput(e.target.value)} 
+                      className={`w-full p-4 rounded-xl mb-6 border ${theme.border} ${theme.inputBg} text-xl text-center font-black focus:outline-none focus:border-yellow-500 transition-colors`} 
+                      placeholder="0" 
+                    />
+                    <div className="flex justify-end gap-2.5">
+                      <button onClick={closeModal} className="px-4 py-2 rounded-xl text-sm font-semibold bg-slate-700/50 hover:bg-slate-700 text-white transition-all">Cancelar</button>
+                      <button onClick={confirmSetPercentage} className="px-6 py-2 rounded-xl text-sm font-semibold bg-yellow-500 hover:bg-yellow-600 text-slate-900 transition-all shadow-md">Confirmar</button>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+
+          {undoAction && (
+            <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-[140] flex items-center gap-3 bg-slate-900 text-white border border-slate-700 shadow-2xl rounded-2xl px-4 py-3 text-xs">
+              <span>{undoAction.message}</span>
+              <button onClick={undoLastAction} className="font-extrabold text-blue-300 hover:text-blue-200">Desfazer</button>
+            </div>
+          )}
+
+          {}
+          {showPdfModal && (
+            <div className="fixed inset-0 bg-black/85 z-[120] flex items-center justify-center p-3 backdrop-blur-md">
+              <div className="bg-white text-slate-900 w-full max-w-2xl rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
+                <div className="bg-slate-900 text-white p-4 flex justify-between items-center">
+                  <h3 className="font-extrabold text-sm">📄 Editor e Exportador PDF</h3>
+                  <button onClick={() => setShowPdfModal(false)} className="p-1 rounded-full hover:bg-slate-800 text-white">✕</button>
+                </div>
+                
+                <div className="p-3 bg-slate-100 border-b flex items-center justify-between">
+                  <span className="font-bold text-xs text-slate-700">Incluir horários no PDF?</span>
+                  <button onClick={() => setPdfIncludeHours(!pdfIncludeHours)} className={`px-3 py-1 rounded-xl text-xs font-bold transition-all ${pdfIncludeHours ? 'bg-blue-600 text-white' : 'bg-slate-300 text-slate-700'}`}>
+                    {pdfIncludeHours ? 'Com Horas' : 'Só Status'}
+                  </button>
+                </div>
+
+                <div className="p-5 overflow-y-auto space-y-4 font-sans text-xs bg-slate-50 flex-1">
+                  <div ref={pdfContentRef} className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-4 text-[16px]" style={{ color: '#0f172a', fontFamily: 'sans-serif', width: '100%' }}>
+                    <input 
+                      type="text" value={pdfCustomTitle} onChange={e => setPdfCustomTitle(e.target.value)}
+                      style={{ fontSize: '24px', fontWeight: 'bold', textTransform: 'uppercase', color: '#1e3a8a', width: '100%', background: 'transparent', border: 'none', borderBottom: '2.5px solid #1e3a8a', padding: '6px 0', marginBottom: '10px' }}
+                    />
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginBottom: '14px', fontSize: '15px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span style={{ fontWeight: 'bold', color: '#334155', width: '145px', whiteSpace: 'nowrap' }}>Início previsto:</span>
+                        <input type="text" value={pdfCustomStart} onChange={e => setPdfCustomStart(e.target.value)} style={{ fontWeight: 'bold', color: '#334155', width: '100%', background: 'transparent', border: 'none', fontSize: '15px' }} />
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span style={{ fontWeight: 'bold', color: '#334155', width: '145px', whiteSpace: 'nowrap' }}>Término previsto:</span>
+                        <input type="text" value={pdfCustomEnd} onChange={e => setPdfCustomEnd(e.target.value)} style={{ fontWeight: 'bold', color: '#334155', width: '100%', background: 'transparent', border: 'none', fontSize: '15px' }} />
+                      </div>
+                    </div>
+
+                    <div style={{ marginTop: '14px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                      {pdfCustomTasks.map((task) => {
+                        if (task.isSection) {
+                          const pct = sectionProgress[task.id] || 0;
+                          return (
+                            <div key={task.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', marginTop: '16px', borderTop: '2px solid #cbd5e1', paddingTop: '10px', pageBreakInside: 'avoid' }}>
+                              <input type="text" value={task.name} onChange={(e) => updatePdfTaskField(task.id, 'name', e.target.value)} style={{ fontWeight: 'bold', fontSize: '17px', color: '#1e3a8a', width: '100%', background: 'transparent', border: 'none', textTransform: 'uppercase' }} />
+                              <span style={{ fontWeight: 'bold', fontSize: '15px', color: pct === 100 ? '#15803d' : '#1e3a8a', whiteSpace: 'nowrap' }}>{pct}%</span>
+                            </div>
+                          );
+                        } else {
+                          const icon = task.status === 'none' ? '' : task.status;
+                          let taskNameDisplay = task.name;
+                          if (task.status === '🟡' && task.progress) taskNameDisplay = `${task.name} - ${task.progress}%`;
+
+                          const durStr = task.duration || getLiveDurationString(task.startTimeMs, task.endTimeMs, task.status);
+                          const startStr = task.startTime || formatTimeString(task.startTimeMs);
+                          const endStr = task.endTime || formatTimeString(task.endTimeMs);
+
+                          return (
+                            <div key={task.id} style={{ paddingLeft: '8px', marginBottom: '6px', pageBreakInside: 'avoid' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                                <span style={{ fontSize: '17px', lineHeight: '1' }}>{icon}</span>
+                                <textarea rows={1} value={taskNameDisplay} onChange={(e) => {
+                                    if(task.status === '🟡' && task.progress) return; 
+                                    updatePdfTaskField(task.id, 'name', e.target.value)
+                                }} style={{ fontWeight: '600', fontSize: '15px', color: '#1e293b', width: '100%', background: 'transparent', border: 'none', resize: 'none', overflow: 'hidden', padding: '0', margin: '0', lineHeight: '1.2' }} />
+                              </div>
+                              {pdfIncludeHours && (task.status !== '▪️' && task.status !== '▫️') && (durStr || startStr || endStr) && (
+                                <div style={{ paddingLeft: '28px', fontSize: '13px', color: '#64748b', marginTop: '3px', display: 'flex', gap: '14px' }}>
+                                  {startStr && <span>▪️ Início: {startStr}</span>}
+                                  {endStr && <span>▪️ Término: {endStr}</span>}
+                                  {durStr && <span>▪️ Duração: {durStr}</span>}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        }
+                      })}
+                    </div>
+                  </div>
+                </div>
+                <div className="p-4 bg-white border-t border-slate-200 flex justify-end gap-2">
+                  <button onClick={() => setShowPdfModal(false)} className="px-4 py-2 rounded-xl text-xs font-semibold bg-slate-200 hover:bg-slate-300 text-slate-800">Cancelar</button>
+                  <button onClick={downloadPdf} disabled={isGeneratingPdf} className="px-5 py-2 rounded-xl text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white shadow-lg disabled:opacity-50">
+                    {isGeneratingPdf ? 'A processar...' : '📥 Guardar / Partilhar PDF'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {}
+          {showChartModal && (
+            <div className="fixed inset-0 bg-black/85 z-[115] flex items-center justify-center p-3 backdrop-blur-md">
+              <div className="bg-slate-950 text-white w-full max-w-5xl rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[94vh] border border-slate-700">
+                <div className="p-4 flex justify-between items-center border-b border-slate-800">
+                  <div>
+                    <h3 className="font-extrabold text-sm">📊 Gráfico de atividades</h3>
+                    <p className="text-[11px] text-slate-400 mt-1">As fatias mostram a quantidade de atividades por modalidade; o centro mostra o progresso.</p>
+                  </div>
+                  <button onClick={() => setShowChartModal(false)} className="p-1 rounded-full hover:bg-slate-800 text-white">✕</button>
+                </div>
+                <div className="p-3 sm:p-5 overflow-y-auto bg-slate-900 flex-1">
+                  <canvas ref={chartCanvasRef} className="w-full rounded-xl shadow-lg border border-slate-700" aria-label="Gráfico de distribuição das atividades e progresso"></canvas>
+                  <div className="grid grid-cols-2 gap-2 mt-3">
+                    <div className="bg-slate-800 rounded-xl p-3"><p className="text-[10px] text-slate-400 uppercase font-bold">Progresso</p><p className="text-xl font-black text-violet-400">{Math.round(averagePercentage)}%</p></div>
+                    <div className="bg-slate-800 rounded-xl p-3"><p className="text-[10px] text-slate-400 uppercase font-bold">Progresso geral</p><p className="text-xl font-black text-blue-400">{overallProgress}%</p></div>
+                  </div>
+                </div>
+                <div className="p-4 bg-slate-950 border-t border-slate-800 flex justify-end gap-2">
+                  <button onClick={saveChartImage} className="px-4 py-2 rounded-xl text-xs font-bold bg-violet-600 hover:bg-violet-700 text-white shadow-lg">🖼️ Salvar imagem</button>
+                  <button onClick={shareChartImage} className="px-4 py-2 rounded-xl text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white shadow-lg">📤 Gráfico</button>
+                  <button onClick={shareCompleteReport} className="px-4 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-lg">📲 WPP completo</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {}
+          <div className={`sticky top-0 z-40 ${theme.headerBg} border-b ${theme.border} px-3 py-2.5 flex justify-between items-center shadow-sm`}>
+            <div className="flex items-center gap-2.5">
+              <div className={`relative flex items-center justify-center w-9 h-9 rounded-xl ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-200 border-slate-300'} border shadow-inner`}>
+                <span className="w-2.5 h-2.5 rounded-full bg-blue-500 animate-pulse shadow-[0_0_8px_rgba(59,130,246,0.8)]"></span>
+              </div>
+              <div className="flex flex-col">
+                <span className={`font-black text-[12px] tracking-widest ${darkMode ? 'text-slate-100' : 'text-slate-900'} leading-none`}>FAROL PRO</span>
+                <span className="text-[8px] font-bold text-blue-500 uppercase tracking-widest leading-none mt-1">{saveStatus}</span>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-1.5">
+              <button onClick={copyToWhatsApp} className="h-9 px-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-500 font-bold text-[10px] flex items-center gap-1.5 active:scale-95 transition-all">💬 {copySuccess ? 'Copiado.' : 'WPP'}</button>
+              <button onClick={() => { setPdfCustomTitle(data.title); setPdfCustomStart(data.expectedStart); setPdfCustomEnd(data.expectedEnd); setPdfCustomTasks(JSON.parse(JSON.stringify(data.tasks))); setShowPdfModal(true); }} className="h-9 px-3 rounded-xl bg-blue-500/10 border border-blue-500/20 text-blue-500 font-bold text-[10px] flex items-center gap-1.5 active:scale-95 transition-all">📄 PDF</button>
+              <button onClick={() => setShowChartModal(true)} className="h-9 px-3 rounded-xl bg-violet-500/10 border border-violet-500/20 text-violet-400 font-bold text-[10px] flex items-center gap-1.5 active:scale-95 transition-all">📊 Gráfico</button>
+
+              <div className="relative" ref={dropdownRef}>
+                <button onClick={() => setShowMenuDropdown(!showMenuDropdown)} className={`h-9 w-9 rounded-xl ${darkMode ? 'bg-slate-800 border-slate-700 text-slate-100' : 'bg-slate-200 border-slate-300 text-slate-800'} border flex items-center justify-center active:scale-95 transition-all text-sm`}>⚙️</button>
+                {showMenuDropdown && (
+                  <div className={`absolute right-0 top-11 w-48 ${theme.cardBg} border ${theme.border} shadow-2xl rounded-xl p-1.5 z-50 flex flex-col gap-1 text-sm`}>
+                    <button onClick={() => { openModal('IMPORT_WPP'); }} className={`flex items-center gap-2 p-2 rounded-xl bg-blue-600/10 text-blue-600 font-bold text-left`}>
+                      <span>📥 Importar do WPP</span>
+                    </button>
+                    <button onClick={() => { setDarkMode(!darkMode); setShowMenuDropdown(false); }} className={`flex items-center gap-2 p-2 rounded-xl ${theme.hover} font-semibold text-left`}>
+                      <span>{darkMode ? '☀️ Modo Claro' : '🌙 Modo Escuro'}</span>
+                    </button>
+                    <button onClick={() => { setShowTemplates(true); setShowMenuDropdown(false); }} className={`flex items-center gap-2 p-2 rounded-xl ${theme.hover} font-semibold text-left`}>
+                      <span>📁 Modelos Salvos</span>
+                    </button>
+                    <button onClick={() => { openModal('SAVE_TEMPLATE'); }} className={`flex items-center gap-2 p-2 rounded-xl ${theme.hover} font-semibold text-left`}>
+                      <span>💾 Salvar Modelo</span>
+                    </button>
+                    <div className={`my-0.5 border-t ${theme.border}`}></div>
+                    <button onClick={() => { openModal('CLEAR_ALL'); }} className={`flex items-center gap-2 p-2 rounded-xl text-rose-500 hover:bg-rose-500/10 font-semibold text-left`}>
+                      <span>🗑️ Excluir Tudo</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {}
+          <input ref={backupInputRef} type="file" accept="application/json,.json" onChange={handleBackupFile} className="hidden" />
+
+          <div className="max-w-xl mx-auto px-3 mt-3 flex items-center justify-between text-[0.85em] text-slate-400">
+            <div className={`flex items-center gap-1.5 ${darkMode ? 'bg-slate-800/40 border-slate-700/50' : 'bg-slate-200/50 border-slate-300'} p-1.5 rounded-xl border shadow-sm`}>
+              <span className="text-[0.9em] font-bold px-1">Zoom:</span>
+              <button onClick={() => setZoomLevel(prev => Math.max(1, prev - 1))} disabled={zoomLevel === 1} className="w-6 h-6 flex items-center justify-center rounded-lg bg-slate-500/20 disabled:opacity-40 font-bold">-</button>
+              <span className="font-extrabold px-1.5 text-blue-500">{zoomLevel}x</span>
+              <button onClick={() => setZoomLevel(prev => Math.min(4, prev + 1))} disabled={zoomLevel === 4} className="w-6 h-6 flex items-center justify-center rounded-lg bg-slate-500/20 disabled:opacity-40 font-bold">+</button>
+            </div>
+
+            <div className="flex items-center gap-1.5">
+              <button onClick={() => setShowSummary(prev => !prev)} className={`font-bold px-3 py-1.5 rounded-xl transition-all shadow-sm border ${showSummary ? 'bg-violet-600/10 text-violet-500 border-violet-500/30' : `bg-transparent ${theme.textMuted} ${theme.border}`}`}>
+                {showSummary ? '🙈 Ocultar resumo' : '📈 Ver resumo'}
+              </button>
+              <button onClick={toggleWppMode} className={`font-bold px-3 py-1.5 rounded-xl transition-all shadow-sm border ${wppMode !== 'SEM_HORAS' ? 'bg-blue-600/10 text-blue-600 border-blue-500/30' : `bg-transparent ${theme.textMuted} ${theme.border}`}`}>
+                {getWppButtonLabel()}
+              </button>
+            </div>
+          </div>
+
+          {showSummary && (
+            <div className={`max-w-xl mx-auto px-3 mt-3 ${theme.cardBg} border ${theme.border} rounded-2xl p-3 shadow-sm`}>
+            <div className="flex items-center justify-between gap-3 mb-2">
+              <div>
+                <p className={`font-extrabold text-xs uppercase tracking-wider ${theme.text}`}>Resumo da manutenção</p>
+                <p className={`text-[10px] ${theme.textMuted}`}>{summary.total} tarefa{summary.total === 1 ? '' : 's'} principal{summary.total === 1 ? '' : 'is'}</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button onClick={shareSummary} className="px-2 py-1 rounded-lg text-[10px] font-extrabold bg-emerald-500/10 text-emerald-500 border border-emerald-500/30">📤 Compartilhar</button>
+                <span className={`font-black text-lg ${overallProgress === 100 ? 'text-emerald-500' : 'text-blue-500'}`}>{overallProgress}%</span>
+              </div>
+            </div>
+            <div className={`h-2 rounded-full overflow-hidden ${darkMode ? 'bg-slate-800' : 'bg-slate-200'}`} aria-label={`Progresso geral: ${overallProgress}%`}>
+              <div className={`h-full rounded-full transition-all ${overallProgress === 100 ? 'bg-emerald-500' : 'bg-blue-500'}`} style={{ width: `${Math.min(100, Math.max(0, overallProgress))}%` }}></div>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5 mt-3 text-[10px] font-bold">
+              <div className={`rounded-lg px-2 py-1.5 ${darkMode ? 'bg-emerald-500/10 text-emerald-400' : 'bg-emerald-50 text-emerald-700'}`}>🟢 {summary.completed} concluída{summary.completed === 1 ? '' : 's'}</div>
+              <div className={`rounded-lg px-2 py-1.5 ${darkMode ? 'bg-yellow-500/10 text-yellow-400' : 'bg-yellow-50 text-yellow-700'}`}>🟡 {summary.inProgress} andamento</div>
+              <div className={`rounded-lg px-2 py-1.5 ${darkMode ? 'bg-red-500/10 text-red-400' : 'bg-red-50 text-red-700'}`}>🔴 {summary.delayed} atrasada{summary.delayed === 1 ? '' : 's'}</div>
+              <div className={`rounded-lg px-2 py-1.5 ${darkMode ? 'bg-slate-500/10 text-slate-400' : 'bg-slate-100 text-slate-600'}`}>⚪ {summary.notStarted} não iniciada{summary.notStarted === 1 ? '' : 's'}</div>
+              <div className={`rounded-lg px-2 py-1.5 ${darkMode ? 'bg-rose-500/10 text-rose-400' : 'bg-rose-50 text-rose-700'}`}>❌ {summary.cancelled} cancelada{summary.cancelled === 1 ? '' : 's'}</div>
+            </div>
+            {backupMessage && <p role="status" className="text-center text-[11px] text-blue-500 font-bold mt-2">{backupMessage}</p>}
+            {summaryMessage && <p role="status" className="text-center text-[11px] text-emerald-500 font-bold mt-2">{summaryMessage}</p>}
+            </div>
+          )}
+
+          {}
+          {showTemplates && (
+            <div className="fixed inset-0 bg-black/75 z-50 flex items-end sm:items-center justify-center p-3 backdrop-blur-sm">
+              <div className={`${theme.cardBg} w-full sm:w-96 rounded-2xl p-4 shadow-2xl border ${theme.border} max-h-[75vh] flex flex-col`}>
+                <div className={`flex justify-between items-center mb-3 border-b ${theme.border} pb-2.5 flex-shrink-0`}>
+                  <h3 className="font-extrabold text-sm">📁 Histórico de Modelos</h3>
+                  <button onClick={() => setShowTemplates(false)} className={`p-1.5 rounded-full ${theme.hover}`}>✕</button>
+                </div>
+                
+                {templates.length > 0 && (
+                  <div className="relative mb-3 flex-shrink-0">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400">🔍</span>
+                    <input type="text" placeholder="Pesquisar modelo..." value={templateSearch} onChange={e => setTemplateSearch(e.target.value)} className={`w-full bg-transparent border ${theme.border} ${theme.inputBg} rounded-xl pl-9 pr-3 py-2 text-xs font-bold focus:outline-none focus:border-blue-500`} />
+                  </div>
+                )}
+
+                <div className="overflow-y-auto space-y-2 flex-1">
+                  {filteredTemplates.length === 0 ? (
+                    <p className="text-slate-500 text-center py-6 text-xs">Nenhum modelo encontrado.</p>
+                  ) : (
+                    filteredTemplates.map(template => (
+                      <div key={template.id} className={`flex items-center gap-2 p-1.5 rounded-xl border ${theme.border} ${theme.hover} transition-all`}>
+                        <button onClick={() => openModal('LOAD_TEMPLATE', template)} className="flex-1 text-left px-2 text-xs font-bold truncate">{template.name}</button>
+                        <button onClick={() => { if(window.confirm(`Tem a certeza que deseja excluir "${template.name}"?`)) setTemplates(prev => prev.filter(t => t.id !== template.id)); }} className="p-1.5 text-rose-500 hover:bg-rose-500/20 rounded-lg transition-colors flex-shrink-0" title="Excluir Modelo">🗑️</button>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {}
+          {!isDataLoaded ? (
+            <div className="flex flex-col items-center justify-center mt-20 opacity-50">
+              <span className="text-2xl animate-spin mb-3">⚙️</span>
+              <p className="font-bold tracking-widest text-xs uppercase">Carregando...</p>
+            </div>
+          ) : (
+            <div className="max-w-xl mx-auto px-3 mt-4">
+              
+              <div className={`${theme.cardBg} p-5 rounded-2xl border ${theme.border} mb-3 shadow-lg relative overflow-hidden`}>
+                {darkMode && <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-blue-500 to-emerald-500"></div>}
+                <input 
+                  className={`w-full bg-transparent font-black uppercase focus:outline-none tracking-wide text-xl ${theme.text} border-b ${theme.border} pb-3 mb-4`}
+                  value={data.title}
+                  onChange={(e) => updateAndSave({...data, title: e.target.value.toUpperCase()})}
+                  placeholder="NOME DA PREVENTIVA..."
+                />
+                <div className="font-medium space-y-2.5">
+                  <div className={`flex items-center gap-3 p-2.5 rounded-xl border ${darkMode ? 'bg-slate-800/30 border-slate-700/50' : 'bg-slate-100 border-slate-300'}`}>
+                    <DynamicCalendar textValue={data.expectedStart || ''} darkMode={darkMode} />
+                    <div className="flex flex-col flex-1">
+                      <span className={`text-[10px] font-bold uppercase tracking-wider ${theme.textMuted}`}>Início previsto:</span>
+                      <input type="text" value={data.expectedStart} onChange={(e) => updateAndSave({...data, expectedStart: e.target.value.toUpperCase()})} className={`bg-transparent flex-1 focus:outline-none font-bold uppercase text-sm ${theme.text}`} placeholder="22/08/2026 ÀS 09:00" />
+                    </div>
+                  </div>
+                  <div className={`flex items-center gap-3 p-2.5 rounded-xl border ${darkMode ? 'bg-slate-800/30 border-slate-700/50' : 'bg-slate-100 border-slate-300'}`}>
+                    <DynamicCalendar textValue={data.expectedEnd || ''} darkMode={darkMode} />
+                    <div className="flex flex-col flex-1">
+                      <span className={`text-[10px] font-bold uppercase tracking-wider ${theme.textMuted}`}>Término previsto:</span>
+                      <input type="text" value={data.expectedEnd} onChange={(e) => updateAndSave({...data, expectedEnd: e.target.value.toUpperCase()})} className={`bg-transparent flex-1 focus:outline-none font-bold uppercase text-sm ${theme.text}`} placeholder="25/08/2026 ÀS 23:59" />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {}
+              <div className="flex flex-col m-0 p-0 pb-4"> 
+                {data.tasks.map((task, index) => {
+                  let currentSectionIdForInput = null;
+                  if (task.isSection) { currentSectionIdForInput = task.id; } 
+                  else { for (let i = index; i >= 0; i--) { if (data.tasks[i].isSection) { currentSectionIdForInput = data.tasks[i].id; break; } } }
+                  const isNextSection = index === data.tasks.length - 1 || data.tasks[index + 1].isSection;
+
+                  return (
+                    <React.Fragment key={task.id}>
+                      {task.isSection ? (() => {
+                        const pct = sectionProgress[task.id] || 0;
+                        const isComplete = pct === 100;
+                        return (
+                          <div 
+                            className="m-0 p-0 relative"
+                            style={{ marginTop: index === 0 ? '0px' : '10px' }}
+                            draggable
+                            onDragStart={(e) => handleDragStart(e, index)}
+                            onDragOver={handleDragOver}
+                            onDrop={(e) => handleDrop(e, index)}
+                          >
+                            <div className={`py-2 px-3 rounded-lg flex items-center justify-between gap-2 shadow-sm ${theme.sectionBg}`}>
+                              <div className="flex-1 flex items-center gap-2 min-w-0 group relative">
+                                <div className="cursor-grab active:cursor-grabbing opacity-30 hover:opacity-100 p-0.5 flex-shrink-0" title="Pressione e arraste">⠿</div>
+                                <div className="flex flex-col opacity-0 group-hover:opacity-100 transition-opacity absolute -left-7 bg-transparent p-1 hidden sm:flex">
+                                  <button onClick={() => moveSectionBlock(index, 'up')} className="text-slate-500 hover:text-blue-400 p-0 text-[10px]">▲</button>
+                                  <button onClick={() => moveSectionBlock(index, 'down')} className="text-slate-500 hover:text-blue-400 p-0 text-[10px]">▼</button>
+                                </div>
+                                
+                                <input type="text" className={`bg-transparent tracking-wide focus:outline-none ml-0.5 ${theme.sectionText} truncate w-full`} style={{ fontSize: '1.02em' }} value={task.name} onChange={(e) => updateTaskField(task.id, 'name', e.target.value.toUpperCase())} />
+                                <span className={`font-extrabold text-xs px-2.5 py-0.5 rounded flex-shrink-0 ml-2 ${isComplete ? 'bg-emerald-500 text-white shadow-sm' : darkMode ? 'bg-blue-600/70 text-white' : 'bg-blue-600 text-white'}`}>{pct}%</span>
+                              </div>
+
+                              <div className="flex items-center gap-1.5 flex-shrink-0 ml-1">
+                                <button onClick={(e) => { e.stopPropagation(); openModal('CLEAR_SECTION', task); }} className="opacity-60 hover:opacity-100 text-slate-300 p-1.5 text-xs bg-slate-700/50 rounded border border-slate-600/50 active:scale-95 transition-all" title="Limpar tarefas do tópico">🗑️</button>
+                                <button onClick={(e) => { e.stopPropagation(); openModal('DELETE_SECTION', task); }} className="opacity-70 hover:opacity-100 text-rose-500 p-1.5 text-xs bg-rose-500/10 rounded border border-rose-500/30 active:scale-95 transition-all" title="Excluir Tópico e Tarefas">❌</button>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })() : (
+                        <div 
+                          className={`group border-x border-b first:border-t rounded-none relative overflow-visible ${darkMode ? 'border-slate-800/70' : 'border-slate-300 shadow-sm'} ${activeStatusMenu === task.id ? 'z-50' : 'z-10'}`}
+                          style={{ margin: 0 }}
+                          draggable
+                          onDragStart={(e) => handleDragStart(e, index)}
+                          onDragOver={handleDragOver}
+                          onDrop={(e) => handleDrop(e, index)}
+                        >
+                          <div className="absolute inset-y-0 right-0 w-full bg-rose-500 flex items-center justify-end pr-5 text-white text-lg z-0 rounded-none">
+                             🗑️
+                          </div>
+
+                          {}
+                          <div 
+                             className={`flex items-center gap-1.5 min-h-[30px] relative z-10 px-3 py-1.5 ${theme.taskCard}`}
+                             onTouchStart={(e) => { e.currentTarget.dataset.startX = e.touches[0].clientX; e.currentTarget.dataset.startY = e.touches[0].clientY; e.currentTarget.style.transition = 'none'; }}
+                             onTouchMove={(e) => { 
+                                if (e.target.closest('.no-swipe-zone')) return; 
+                                const startX = parseFloat(e.currentTarget.dataset.startX); 
+                                const startY = parseFloat(e.currentTarget.dataset.startY); 
+                                const currentX = e.touches[0].clientX; 
+                                const currentY = e.touches[0].clientY; 
+                                const diffX = startX - currentX; 
+                                const diffY = Math.abs(startY - currentY); 
+                                if (diffX > 20 && diffX > diffY * 1.5) { 
+                                    e.currentTarget.style.transform = `translateX(-${diffX}px)`; 
+                                } 
+                             }}
+                             onTouchEnd={(e) => { 
+                                if (e.target.closest('.no-swipe-zone')) return;
+                                const startX = parseFloat(e.currentTarget.dataset.startX); 
+                                const endX = e.changedTouches[0].clientX; 
+                                const diffX = startX - endX; 
+                                e.currentTarget.style.transition = 'transform 0.2s ease-out'; 
+                                e.currentTarget.style.transform = 'translateX(0)'; 
+                                if (diffX > 120) { removeTask(task.id); } 
+                             }}
+                          >
+                            <div className="flex flex-col opacity-0 group-hover:opacity-100 transition-opacity absolute -left-4 top-1 hidden sm:flex">
+                              <button onClick={() => moveTask(index, 'up')} className="text-slate-500 hover:text-blue-400 p-0 text-[9px]">▲</button>
+                              <button onClick={() => moveTask(index, 'down')} className="text-slate-500 hover:text-blue-400 p-0 text-[9px]">▼</button>
+                            </div>
+
+                            <div className="cursor-grab active:cursor-grabbing opacity-20 hover:opacity-100 px-1 py-0 flex-shrink-0 text-[10px] self-center">⠿</div>
+
+                            <div className="relative flex-shrink-0 flex items-center self-center no-swipe-zone" style={{ marginTop: '-1px' }}>
+                              <button 
+                                onClick={(e) => { e.stopPropagation(); setActiveStatusMenu(activeStatusMenu === task.id ? null : task.id); }}
+                                onDoubleClick={(e) => { e.stopPropagation(); if (task.status === '🟡') { setActiveStatusMenu(null); setPromptInput(task.progress || ''); setModal({ isOpen: true, type: 'SET_PERCENTAGE', data: { id: task.id } }); } }}
+                                onTouchStart={(e) => e.stopPropagation()}
+                                onTouchMove={(e) => e.stopPropagation()} 
+                                className={`leading-none flex items-center justify-center p-0 rounded transition-transform active:scale-95 text-base cursor-pointer`}
+                                title={task.status === '🟡' ? 'Duplo clique para %' : 'Mudar status'}
+                              >
+                                {task.status || '⚪'}
+                              </button>
+                              
+                              {activeStatusMenu === task.id && (
+                                <div ref={menuRef} className={`absolute top-7 left-0 ${theme.cardBg} border ${theme.border} shadow-2xl rounded-xl p-1.5 z-[9999] grid grid-cols-2 gap-1 w-56 max-h-[65vh] overflow-y-auto farol-status-menu`}>
+                                  {STATUS_OPTIONS.map(opt => {
+                                      const isSubMenu = opt.id.startsWith('sub_');
+                                      const compactLabel = opt.id === 'none' ? 'Sub-item' : opt.label.replace(':', '');
+                                      return (
+                                        <button 
+                                          key={opt.id} 
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            if (isSubMenu) {
+                                                const prefix = opt.label + ' ';
+                                                const baseName = task.name.trim();
+                                                const alreadyHasPrefix = baseName.toLowerCase().startsWith(opt.label.toLowerCase());
+                                                updateAndSave(prevData => {
+                                                    return {
+                                                        ...prevData,
+                                                        tasks: prevData.tasks.map(t => {
+                                                            if (t.id === task.id) {
+                                                                return { ...t, status: '▪️', name: alreadyHasPrefix ? baseName : (baseName ? prefix + baseName : prefix) };
+                                                            }
+                                                            return t;
+                                                        })
+                                                    }
+                                                });
+                                            } else {
+                                                updateTaskField(task.id, 'status', opt.icon);
+                                            }
+                                            setActiveStatusMenu(null);
+                                          }} 
+                                          onTouchStart={(e) => e.stopPropagation()} 
+                                          className={`farol-status-option flex items-center gap-1.5 px-2 py-1.5 ${theme.hover} rounded-lg text-left w-full min-h-[32px] text-[11px] font-bold cursor-pointer ${isSubMenu ? 'text-slate-400' : ''}`}
+                                        >
+                                          <span className="text-sm leading-none w-4 text-center">{isSubMenu ? '↳' : (opt.id === 'none' ? '▪️' : opt.icon)}</span>
+                                          <span className="truncate">{compactLabel}</span>
+                                        </button>
+                                      );
+                                  })}
+                                </div>
+                              )}
+                            </div>
+
+                            <textarea 
+                              rows={1}
+                              className={`flex-1 bg-transparent focus:outline-none font-medium resize-none overflow-hidden m-0 p-0 whitespace-pre-wrap break-words w-full self-center leading-normal ml-1.5 ${task.status === '🟢' ? `${theme.textMuted} line-through` : theme.text} ${(task.status === '▪️' || task.status === '▫️') ? 'pl-1 font-semibold' : ''}`}
+                              value={task.name}
+                              onPaste={(e) => handleTaskPaste(e, task.id, index, task.name)}
+                              onChange={(e) => { updateTaskField(task.id, 'name', e.target.value); e.target.style.height = 'auto'; e.target.style.height = e.target.scrollHeight + 'px'; }}
+                              onKeyDown={(e) => { if (e.key === 'Enter') { const now = Date.now(); const last = lastEnterTime.current[task.id] || 0; if (now - last < 400) { e.preventDefault(); const cleanName = task.name.replace(/\n$/, ''); if (cleanName !== task.name) updateTaskField(task.id, 'name', cleanName); const newId = Date.now().toString(); const newTask = { id: newId, isSection: false, name: '', status: '⚪', startTime: '', endTime: '', duration: '', progress: '', startTimeMs: null, endTimeMs: null }; updateAndSave(prev => { const newTasks = [...prev.tasks]; newTasks.splice(index + 1, 0, newTask); return { ...prev, tasks: newTasks }; }); lastEnterTime.current[task.id] = 0; setTimeout(() => { if (taskInputRefs.current[newId]) taskInputRefs.current[newId].focus(); }, 50); } else { lastEnterTime.current[task.id] = now; } } }}
+                              ref={(el) => { taskInputRefs.current[task.id] = el; if (el) { el.style.height = 'auto'; el.style.height = el.scrollHeight + 'px'; } }}
+                              placeholder="Nome da tarefa..."
+                              style={{ minHeight: '22px', wordBreak: 'break-word', overflowWrap: 'break-word', paddingTop: '2px' }}
+                            />
+
+                            <div className="flex items-center gap-1.5 flex-shrink-0 self-center no-swipe-zone">
+                              {task.status === '🟡' && task.progress && (
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); setPromptInput(task.progress || ''); setModal({ isOpen: true, type: 'SET_PERCENTAGE', data: { id: task.id } }); }}
+                                  onTouchStart={(e) => e.stopPropagation()}
+                                  onTouchMove={(e) => e.stopPropagation()}
+                                  className={`px-2 py-0.5 rounded-lg text-[10px] font-black tracking-tighter border active:scale-95 transition-transform ${theme.badgeBg}`}
+                                >
+                                  {task.progress}%
+                                </button>
+                              )}
+                            </div>
+
+                            {}
+                            {(task.status !== '▪️' && task.status !== '▫️' && task.status !== '◾') && (
+                                <div className="flex items-center gap-0 flex-shrink-0 self-center pl-1 no-swipe-zone">
+                                  <button onClick={(e) => { e.stopPropagation(); toggleExpand(task.id); }} onTouchStart={(e) => e.stopPropagation()} onTouchMove={(e) => e.stopPropagation()} className={`p-1 rounded transition-all opacity-40 hover:opacity-100 ${ (task.startTimeMs || task.endTimeMs || task.duration || task.status === '🟡') ? 'text-white font-bold bg-white/20 opacity-100' : theme.textMuted}`}>🕒</button>
+                                </div>
+                            )}
+                          </div>
+
+                          {expandedTasks[task.id] && (task.status !== '▪️' && task.status !== '▫️') && (
+                            <div className={`relative z-10 px-3 pb-2 ${theme.taskCard}`}>
+                                <div className={`mt-0 pt-1.5 border-t ${darkMode ? 'border-slate-800' : 'border-slate-300'} flex flex-col gap-1 ${darkMode ? 'bg-slate-900/40' : 'bg-slate-100'} p-1.5 rounded-lg`} style={{ fontSize: '0.85em' }}>
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className={`${theme.textMuted} font-bold text-[10px] uppercase tracking-wider`}>Duração</span>
+                                    <input type="text" value={task.duration || getLiveDurationString(task.startTimeMs, task.endTimeMs, task.status)} onChange={(e) => updateTaskField(task.id, 'duration', e.target.value)} className={`bg-transparent border-b ${darkMode ? 'border-slate-700' : 'border-slate-400'} px-2 py-0.5 w-28 text-center font-bold focus:outline-none`} placeholder="Ex: 01h33m" />
+                                  </div>
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className={`${theme.textMuted} font-bold text-[10px] uppercase tracking-wider`}>Início</span>
+                                    <div className="flex items-center gap-1.5">
+                                      <input type="text" value={task.startTime || formatTimeString(task.startTimeMs)} onChange={(e) => updateTaskField(task.id, 'startTime', e.target.value)} className={`bg-transparent border-b ${darkMode ? 'border-slate-700' : 'border-slate-400'} px-2 py-0.5 w-20 text-center font-bold text-blue-500 focus:outline-none`} placeholder="18:00" />
+                                      <button onClick={() => handleAutoTime(task.id, 'startTimeMs')} className="bg-blue-600/10 text-blue-500 px-2 py-0.5 rounded font-bold text-[10px] hover:bg-blue-600/20 transition-colors">Agora</button>
+                                    </div>
+                                  </div>
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className={`${theme.textMuted} font-bold text-[10px] uppercase tracking-wider`}>Término</span>
+                                    <div className="flex items-center gap-1.5">
+                                      <input type="text" value={task.endTime || formatTimeString(task.endTimeMs)} onChange={(e) => updateTaskField(task.id, 'endTime', e.target.value)} className={`bg-transparent border-b ${darkMode ? 'border-slate-700' : 'border-slate-400'} px-2 py-0.5 w-20 text-center font-bold text-emerald-500 focus:outline-none`} placeholder="19:33" />
+                                      <button onClick={() => handleAutoTime(task.id, 'endTimeMs')} className="bg-emerald-600/10 text-emerald-500 px-2 py-0.5 rounded font-bold text-[10px] hover:bg-emerald-600/20 transition-colors">Agora</button>
+                                    </div>
+                                  </div>
+                                </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {isNextSection && currentSectionIdForInput && (
+                        <div className={`px-3 py-1 border-x border-b ${darkMode ? 'border-slate-800 bg-[#0c1322]' : 'border-slate-300 bg-slate-100'} flex items-center gap-1.5 transition-colors`} style={{ margin: 0 }}>
+                          <span className="text-slate-400 font-bold ml-1 text-base self-center" style={{ marginTop: '-1px' }}>⚪</span>
+                          <textarea
+                            rows={1}
+                            placeholder="Adicionar tarefa ou colar lista..."
+                            className={`flex-1 bg-transparent py-0.5 ml-0.5 focus:outline-none font-medium text-[0.9em] resize-none self-center leading-normal ${theme.text}`}
+                            value={sectionInputs[currentSectionIdForInput] || ''}
+                            onChange={(e) => { setSectionInputs(prev => ({...prev, [currentSectionIdForInput]: e.target.value})); e.target.style.height = 'auto'; e.target.style.height = e.target.scrollHeight + 'px'; }}
+                            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleAddSectionTask(currentSectionIdForInput); } }}
+                            style={{ minHeight: '22px', paddingTop: '2px' }}
+                          />
+                          <button onClick={() => handleAddSectionTask(currentSectionIdForInput)} className="bg-blue-600 hover:bg-blue-700 text-white w-6 h-6 rounded flex items-center justify-center font-bold text-sm shadow-sm active:scale-95 flex-shrink-0 cursor-pointer self-center" title="Adicionar">+</button>
+                        </div>
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+              </div>
+
+              {}
+              <div className={`mt-4 mb-4 p-3 rounded-xl border border-dashed ${darkMode ? 'border-slate-700/80 bg-slate-800/20' : 'border-slate-400 bg-slate-200/50'} flex items-center gap-3 shadow-sm`}>
+                <span className="text-blue-500 font-bold px-1">+</span>
+                <input ref={topicInputRef} type="text" placeholder="NOME DO NOVO TÓPICO..." className={`flex-1 bg-transparent font-bold tracking-wide focus:outline-none ${theme.text} text-sm uppercase placeholder-slate-500`} value={newSectionName} onChange={(e) => setNewSectionName(e.target.value.toUpperCase())} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addSection(); } }} />
+                <button onClick={addSection} className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg font-bold text-xs shadow-sm active:scale-95 transition-transform cursor-pointer">Criar</button>
+              </div>
+
+              <div className={`mt-8 mb-4 p-4 rounded-xl border ${theme.border} ${theme.cardBg} shadow-sm`} style={{ fontSize: '0.9em' }}>
+                <p className="font-bold mb-3 uppercase text-slate-500 tracking-wider text-[10px]">Legenda de Status</p>
+                <div className="flex flex-col gap-2.5">
+                  <div className="flex items-center gap-2.5 font-medium"><span className="text-base">⚪</span> <span className={theme.textMuted}>Não iniciado</span></div>
+                  <div className="flex items-center gap-2.5 font-medium"><span className="text-base">🟡</span> <span className={theme.textMuted}>Em andamento</span></div>
+                  <div className="flex items-center gap-2.5 font-medium"><span className="text-base">🟢</span> <span className={theme.textMuted}>Concluído</span></div>
+                  <div className="flex items-center gap-2.5 font-medium"><span className="text-base">🔴</span> <span className={theme.textMuted}>Atrasado</span></div>
+                  <div className="flex items-center gap-2.5 font-medium"><span className="text-base">❌</span> <span className={theme.textMuted}>Cancelado</span></div>
+                  <div className="flex items-center gap-2.5 font-medium mt-1 pt-2 border-t border-slate-700/30"><span className="text-base opacity-70">👈</span> <span className={theme.textMuted}>Deslize as <b>tarefas</b> para a esquerda para apagar</span></div>
+                </div>
+              </div>
+
+              <div className="text-center mt-10 mb-12 font-bold tracking-widest text-slate-500 uppercase text-[10px] opacity-60">
+                KENDRIO • FAROL PRO V32
+              </div>
+
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    ReactDOM.render(<App />, document.getElementById('root'));
+  </script>
+</body>
+</html>
