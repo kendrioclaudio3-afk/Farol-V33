@@ -119,6 +119,7 @@
       const [pdfCustomStart, setPdfCustomStart] = useState('');
       const [pdfCustomEnd, setPdfCustomEnd] = useState('');
       const [pdfCustomTasks, setPdfCustomTasks] = useState([]);
+      const [pdfChartDataUrl, setPdfChartDataUrl] = useState('');
       
       const [activeStatusMenu, setActiveStatusMenu] = useState(null);
       const [expandedTasks, setExpandedTasks] = useState({});
@@ -380,15 +381,73 @@
         ? 0
         : modalityProgressValues.reduce((sum, value) => sum + value, 0) / modalityProgressValues.length;
 
+      const blobToDataUrl = (blob) => new Promise((resolve, reject) => {
+        if (!blob) { reject(new Error('Arquivo vazio')); return; }
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+
+      const canvasToBlob = (canvas, type = 'image/png', quality) => new Promise((resolve, reject) => {
+        try {
+          if (canvas && typeof canvas.toBlob === 'function') {
+            canvas.toBlob(blob => {
+              if (blob) resolve(blob);
+              else reject(new Error('Não foi possível criar o arquivo'));
+            }, type, quality);
+          } else if (canvas) {
+            fetch(canvas.toDataURL(type, quality)).then(response => response.blob()).then(resolve).catch(reject);
+          } else reject(new Error('Gráfico indisponível'));
+        } catch (error) { reject(error); }
+      });
+
+      const isEmbeddedApp = () => {
+        const ua = navigator.userAgent || '';
+        return /; wv\)|\bWebView\b|Instagram|FBAN|FBAV/i.test(ua) ||
+          window.matchMedia?.('(display-mode: standalone)').matches || navigator.standalone === true;
+      };
+
       const downloadFile = (blob, filename) => {
+        if (!blob) return false;
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        a.rel = 'noopener';
+        a.style.display = 'none';
+        if (isEmbeddedApp()) {
+          // Em WebViews o atributo download costuma ser ignorado. Abrimos o
+          // arquivo para o menu nativo do aparelho (Salvar/Compartilhar).
+          a.target = '_blank';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+        } else {
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+        }
+        setTimeout(() => {
+          try { URL.revokeObjectURL(url); } catch (e) {}
+        }, 30000);
+        return true;
+      };
+
+      const shareOrDownloadFile = async (blob, filename, title, text = '') => {
+        if (!blob) return false;
+        const file = new File([blob], filename, { type: blob.type || 'application/octet-stream' });
+        try {
+          const canShareFiles = typeof navigator.share === 'function' &&
+            (!navigator.canShare || navigator.canShare({ files: [file] }));
+          if (canShareFiles) {
+            await navigator.share({ files: [file], title, text });
+            return true;
+          }
+        } catch (error) {
+          if (error?.name === 'AbortError') return false;
+        }
+        return downloadFile(blob, filename);
       };
 
       const exportBackup = () => {
@@ -405,16 +464,19 @@
         setTimeout(() => setBackupMessage(''), 2500);
       };
 
-      const drawActivityChart = () => {
-        const canvas = chartCanvasRef.current;
+      const drawActivityChart = (targetCanvas = chartCanvasRef.current) => {
+        const canvas = targetCanvas;
         if (!canvas) return;
         const width = 1600, height = 1020;
-        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        // Em WebViews Android, canvas grande com DPR 2/3 pode ficar vazio por limite de memória.
+        // Mantemos a arte em 1600x1020 e usamos DPR 1; continua nítida e exportável.
+        const dpr = 1;
         canvas.width = width * dpr;
         canvas.height = height * dpr;
         canvas.style.aspectRatio = `${width} / ${height}`;
-        const ctx = canvas.getContext('2d');
-        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        const ctx = canvas.getContext('2d', { alpha: false });
+        if (!ctx) return;
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.clearRect(0, 0, width, height);
 
         const roundedRect = (x, y, w, h, r, fill, stroke = null) => {
@@ -608,66 +670,64 @@
 
       useEffect(() => {
         if (!showChartModal) return;
-        const frame = requestAnimationFrame(drawActivityChart);
-        return () => cancelAnimationFrame(frame);
+        // Dois disparos cobrem WebViews que ainda não anexaram o canvas no
+        // primeiro requestAnimationFrame após abrir o modal.
+        const draw = () => drawActivityChart();
+        const frame = requestAnimationFrame(draw);
+        const retry = setTimeout(draw, 180);
+        return () => { cancelAnimationFrame(frame); clearTimeout(retry); };
       }, [showChartModal, data.tasks, averagePercentage, overallProgress]);
 
-      const saveChartImage = () => {
-        drawActivityChart();
-        chartCanvasRef.current?.toBlob(blob => {
-          if (blob) downloadFile(blob, `farol-pro-grafico-${new Date().toISOString().slice(0, 10)}.png`);
-        }, 'image/png');
+      const createChartBlob = async () => {
+        const canvas = document.createElement('canvas');
+        drawActivityChart(canvas);
+        return canvasToBlob(canvas, 'image/png');
+      };
+
+      const saveChartImage = async () => {
+        try {
+          const blob = await createChartBlob();
+          const filename = `farol-pro-grafico-${new Date().toISOString().slice(0, 10)}.png`;
+          const saved = await shareOrDownloadFile(blob, filename, 'Gráfico Farol Pro', 'Gráfico de atividades da manutenção.');
+          if (saved) setSummaryMessage('Gráfico pronto para salvar ou compartilhar.');
+        } catch (error) {
+          setSummaryMessage('Não foi possível gerar a imagem do gráfico.');
+        }
+        setTimeout(() => setSummaryMessage(''), 3000);
       };
 
       const shareChartImage = async () => {
-        drawActivityChart();
-        chartCanvasRef.current?.toBlob(async blob => {
-          if (!blob) return;
-          const file = new File([blob], `farol-pro-grafico-${new Date().toISOString().slice(0, 10)}.png`, { type: 'image/png' });
-          try {
-            if (navigator.canShare && navigator.canShare({ files: [file] })) {
-              await navigator.share({ files: [file], title: 'Gráfico Farol Pro', text: 'Análise de atividades da manutenção.' });
-            } else {
-              downloadFile(blob, file.name);
-            }
-          } catch (error) {
-            if (error?.name !== 'AbortError') downloadFile(blob, file.name);
-          }
-        }, 'image/png');
+        try {
+          const blob = await createChartBlob();
+          const filename = `farol-pro-grafico-${new Date().toISOString().slice(0, 10)}.png`;
+          const shared = await shareOrDownloadFile(blob, filename, 'Gráfico Farol Pro', 'Análise de atividades da manutenção.');
+          if (shared) setSummaryMessage('Gráfico pronto para compartilhar.');
+        } catch (error) {
+          setSummaryMessage('Não foi possível gerar o gráfico.');
+        }
+        setTimeout(() => setSummaryMessage(''), 3000);
       };
 
       const shareCompleteReport = async () => {
-        drawActivityChart();
-        const statusText = [
-          `*STATUS DAS ATIVIDADES — ${(data.title || 'MANUTENÇÃO').toUpperCase()}*`,
-          `🟢 ${summary.completed}/${summary.total} concluídas`,
-          `🟡 ${summary.inProgress}/${summary.total} em andamento`,
-          `⚪ ${summary.notStarted}/${summary.total} não iniciadas`,
-          `🔴 ${summary.delayed}/${summary.total} atrasadas`,
-          `❌ ${summary.cancelled}/${summary.total} canceladas`
-        ].join('\n');
-        const text = `${buildWppText()}\n\n${statusText}`;
-        chartCanvasRef.current?.toBlob(async blob => {
-          if (!blob) return;
-          const file = new File([blob], `farol-pro-${new Date().toISOString().slice(0, 10)}.png`, { type: 'image/png' });
-          try {
-            if (navigator.canShare && navigator.canShare({ files: [file] })) {
-              await navigator.share({ files: [file], title: `Farol Pro — ${data.title || 'Manutenção'}`, text });
-              setSummaryMessage('Farol, gráfico e status compartilhados.');
-            } else {
-              copyToClipboardHelper(text);
-              downloadFile(blob, file.name);
-              setSummaryMessage('Texto copiado e gráfico salvo para compartilhar.');
-            }
-          } catch (error) {
-            if (error?.name !== 'AbortError') {
-              copyToClipboardHelper(text);
-              downloadFile(blob, file.name);
-              setSummaryMessage('Texto copiado e gráfico salvo para compartilhar.');
-            }
-          }
-          setTimeout(() => setSummaryMessage(''), 3000);
-        }, 'image/png');
+        try {
+          const blob = await createChartBlob();
+          const statusText = [
+            `*STATUS DAS ATIVIDADES — ${(data.title || 'MANUTENÇÃO').toUpperCase()}*`,
+            `🟢 ${summary.completed}/${summary.total} concluídas`,
+            `🟡 ${summary.inProgress}/${summary.total} em andamento`,
+            `⚪ ${summary.notStarted}/${summary.total} não iniciadas`,
+            `🔴 ${summary.delayed}/${summary.total} atrasadas`,
+            `❌ ${summary.cancelled}/${summary.total} canceladas`
+          ].join('\n');
+          const text = `${buildWppText()}\n\n${statusText}`;
+          const filename = `farol-pro-${new Date().toISOString().slice(0, 10)}.png`;
+          const shared = await shareOrDownloadFile(blob, filename, `Farol Pro — ${data.title || 'Manutenção'}`, text);
+          if (shared) setSummaryMessage('Farol, gráfico e status prontos para compartilhar.');
+        } catch (error) {
+          copyToClipboardHelper(buildWppText());
+          setSummaryMessage('Texto copiado; não foi possível anexar o gráfico.');
+        }
+        setTimeout(() => setSummaryMessage(''), 3500);
       };
 
       const shareSummary = async () => {
@@ -1099,26 +1159,49 @@
       };
 
       const downloadPdf = async () => {
-        if (!window.html2pdf) return;
+        if (!pdfContentRef.current) return;
         setIsGeneratingPdf(true);
-        const opt = { 
-          margin: [8, 8, 8, 8], 
-          filename: `${(pdfCustomTitle || 'relatorio').replace(/[/\\?%*:|"<>]/g, '_')}.pdf`, 
-          image: { type: 'jpeg', quality: 0.98 }, 
-          html2canvas: { scale: 2, useCORS: true, letterRendering: true, scrollY: 0, windowY: 0 }, 
-          jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }, 
-          pagebreak: { mode: ['avoid-all', 'css', 'legacy'] } 
+        const safeTitle = (pdfCustomTitle || 'relatorio').replace(/[/\\?%*:|"<>]/g, '_');
+        const filename = `${safeTitle}.pdf`;
+        const opt = {
+          margin: [8, 8, 8, 8],
+          filename,
+          image: { type: 'jpeg', quality: 0.98 },
+          html2canvas: { scale: Math.min(2, Math.max(1, window.devicePixelRatio || 1)), useCORS: true, allowTaint: false, letterRendering: true, scrollY: 0, windowY: 0, backgroundColor: '#ffffff' },
+          jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+          pagebreak: { mode: ['avoid-all', 'css', 'legacy'] }
         };
         try {
-          const pdfBlob = await window.html2pdf().from(pdfContentRef.current).set(opt).output('blob');
-          const file = new File([pdfBlob], opt.filename, { type: 'application/pdf' });
-          if (navigator.canShare && navigator.canShare({ files: [file] })) {
-             await navigator.share({ files: [file], title: 'Relatório Farol Pro', text: 'Relatório de manutenção exportado.' });
-          } else {
-             const url = URL.createObjectURL(pdfBlob);
-             const a = document.createElement('a'); a.href = url; a.download = opt.filename; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+          if (!window.html2pdf) {
+            // Fallback para WebViews que bloqueiam a biblioteca externa: abre a
+            // impressão nativa, que permite escolher "Salvar como PDF".
+            window.print();
+            setSummaryMessage('Use a opção Imprimir > Salvar como PDF.');
+            return;
           }
-        } catch (err) { console.error('Erro ao processar PDF.'); } finally { setIsGeneratingPdf(false); setShowPdfModal(false); }
+          const pdfBlob = await window.html2pdf().from(pdfContentRef.current).set(opt).output('blob');
+          await shareOrDownloadFile(pdfBlob, filename, 'Relatório Farol Pro', 'Relatório de manutenção exportado.');
+        } catch (err) {
+          try { window.print(); } catch (printError) {}
+          setSummaryMessage('A exportação abriu a impressão para salvar em PDF.');
+        } finally {
+          setIsGeneratingPdf(false);
+          setShowPdfModal(false);
+          setTimeout(() => setSummaryMessage(''), 4000);
+        }
+      };
+
+      const openPdfEditor = async () => {
+        setPdfCustomTitle(data.title);
+        setPdfCustomStart(data.expectedStart);
+        setPdfCustomEnd(data.expectedEnd);
+        setPdfCustomTasks(JSON.parse(JSON.stringify(data.tasks)));
+        setPdfChartDataUrl('');
+        setShowPdfModal(true);
+        try {
+          const chartBlob = await createChartBlob();
+          setPdfChartDataUrl(await blobToDataUrl(chartBlob));
+        } catch (error) { setPdfChartDataUrl(''); }
       };
 
       const openModal = (type, modalData = null) => { setPromptInput(''); setImportText(''); setTemplateSearch(''); setModal({ isOpen: true, type, data: modalData }); setShowMenuDropdown(false); };
@@ -1324,6 +1407,12 @@
                       </div>
                     </div>
 
+                    {pdfChartDataUrl && (
+                      <div style={{ marginTop: '16px', marginBottom: '16px', pageBreakInside: 'avoid' }}>
+                        <div style={{ fontWeight: 'bold', fontSize: '15px', color: '#1e3a8a', marginBottom: '6px' }}>Gráfico de atividades</div>
+                        <img src={pdfChartDataUrl} alt="Gráfico de atividades" style={{ display: 'block', width: '100%', height: 'auto', border: '1px solid #e2e8f0' }} />
+                      </div>
+                    )}
                     <div style={{ marginTop: '14px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
                       {pdfCustomTasks.map((task) => {
                         if (task.isSection) {
@@ -1417,7 +1506,7 @@
 
             <div className="flex items-center gap-1.5">
               <button onClick={copyToWhatsApp} className="h-9 px-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-500 font-bold text-[10px] flex items-center gap-1.5 active:scale-95 transition-all">💬 {copySuccess ? 'Copiado.' : 'WPP'}</button>
-              <button onClick={() => { setPdfCustomTitle(data.title); setPdfCustomStart(data.expectedStart); setPdfCustomEnd(data.expectedEnd); setPdfCustomTasks(JSON.parse(JSON.stringify(data.tasks))); setShowPdfModal(true); }} className="h-9 px-3 rounded-xl bg-blue-500/10 border border-blue-500/20 text-blue-500 font-bold text-[10px] flex items-center gap-1.5 active:scale-95 transition-all">📄 PDF</button>
+              <button onClick={openPdfEditor} className="h-9 px-3 rounded-xl bg-blue-500/10 border border-blue-500/20 text-blue-500 font-bold text-[10px] flex items-center gap-1.5 active:scale-95 transition-all">📄 PDF</button>
               <button onClick={() => setShowChartModal(true)} className="h-9 px-3 rounded-xl bg-violet-500/10 border border-violet-500/20 text-violet-400 font-bold text-[10px] flex items-center gap-1.5 active:scale-95 transition-all">📊 Gráfico</button>
 
               <div className="relative" ref={dropdownRef}>
