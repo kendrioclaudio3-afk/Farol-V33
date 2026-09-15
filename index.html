@@ -1051,7 +1051,9 @@
           if (task.isSection) {
             const pct = sectionProgress[task.id] || 0;
             if (index > 0) text += `\n`;
-            text += `${task.name.toUpperCase()} - ${pct}%\n\n`;
+            // O WhatsApp interpreta o conteúdo entre asteriscos como negrito.
+            // Mantemos o nome do tópico exatamente como foi cadastrado.
+            text += `*${task.name}* - ${pct}%\n\n`;
           } else {
             text += formatTaskForWpp(task);
           }
