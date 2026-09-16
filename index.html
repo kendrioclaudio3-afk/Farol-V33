@@ -1051,9 +1051,7 @@
           if (task.isSection) {
             const pct = sectionProgress[task.id] || 0;
             if (index > 0) text += `\n`;
-            // O WhatsApp interpreta o conteúdo entre asteriscos como negrito.
-            // Mantemos o nome do tópico exatamente como foi cadastrado.
-            text += `*${task.name}* - ${pct}%\n\n`;
+            text += `*${task.name.toUpperCase()}* - ${pct}%\n\n`;
           } else {
             text += formatTaskForWpp(task);
           }
@@ -1064,6 +1062,36 @@
       };
 
       const copyToWhatsApp = () => copyToClipboardHelper(buildWppText());
+
+      // NOVA FUNÇÃO: Copiar apenas um tópico específico
+      const copySectionToWhatsApp = (sectionId) => {
+        let text = '';
+        let inSection = false;
+        let sectionName = '';
+
+        for (let i = 0; i < data.tasks.length; i++) {
+          const t = data.tasks[i];
+          if (t.isSection) {
+            if (t.id === sectionId) {
+              inSection = true;
+              sectionName = t.name;
+              const pct = sectionProgress[t.id] || 0;
+              text += `*${data.title.toUpperCase()}*\n\n`;
+              text += `*${sectionName.toUpperCase()}* - ${pct}%\n\n`;
+            } else if (inSection) {
+              break; // Saiu da seção, interrompe a busca
+            }
+          } else if (inSection) {
+            text += formatTaskForWpp(t);
+          }
+        }
+
+        if (!text) return;
+        text += `\nLegenda:\n\n⚪ Não iniciado\n🟡 Em andamento\n🟢 Concluído\n🔴 Atrasado\n❌ Cancelado`;
+        copyToClipboardHelper(text);
+        setSummaryMessage('Tópico copiado para o WPP!');
+        setTimeout(() => setSummaryMessage(''), 2500);
+      };
 
       const processSmartImport = () => {
         if (!importText.trim()) return;
@@ -1683,7 +1711,17 @@
                                 </div>
                                 
                                 <input type="text" className={`bg-transparent tracking-wide focus:outline-none ml-0.5 ${theme.sectionText} truncate w-full`} style={{ fontSize: '1.02em' }} value={task.name} onChange={(e) => updateTaskField(task.id, 'name', e.target.value.toUpperCase())} />
-                                <span className={`font-extrabold text-xs px-2.5 py-0.5 rounded flex-shrink-0 ml-2 ${isComplete ? 'bg-emerald-500 text-white shadow-sm' : darkMode ? 'bg-blue-600/70 text-white' : 'bg-blue-600 text-white'}`}>{pct}%</span>
+                                
+                                {/* NOVO BOTÃO DE COPIAR O TÓPICO */}
+                                <button 
+                                  onClick={(e) => { e.stopPropagation(); copySectionToWhatsApp(task.id); }}
+                                  className="opacity-50 hover:opacity-100 text-blue-400 p-1 text-sm active:scale-95 transition-all flex-shrink-0 ml-1"
+                                  title="Copiar apenas este tópico para WPP"
+                                >
+                                  📋
+                                </button>
+
+                                <span className={`font-extrabold text-xs px-2.5 py-0.5 rounded flex-shrink-0 ml-1 ${isComplete ? 'bg-emerald-500 text-white shadow-sm' : darkMode ? 'bg-blue-600/70 text-white' : 'bg-blue-600 text-white'}`}>{pct}%</span>
                               </div>
 
                               <div className="flex items-center gap-1.5 flex-shrink-0 ml-1">
